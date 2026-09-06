@@ -364,7 +364,7 @@ mod win_impl {
 
             // GDI returns BGRA and often leaves alpha at zero. Convert once
             // into the shared compressed PNG encoder's RGBA representation.
-            for pixel in pixels.chunks_exact_mut(4) {
+            for pixel in pixels.as_chunks_mut::<4>().0 {
                 pixel.swap(0, 2);
                 pixel[3] = 255;
             }

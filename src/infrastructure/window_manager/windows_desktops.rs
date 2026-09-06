@@ -11,7 +11,9 @@ fn parse_desktop_ids(bytes: &[u8]) -> Option<Vec<DesktopGuid>> {
         return None;
     }
     let ids: Vec<DesktopGuid> = bytes
-        .chunks_exact(16)
+        .as_chunks::<16>()
+        .0
+        .iter()
         .map(|id| id.try_into().unwrap())
         .collect();
     let mut seen = HashSet::new();
@@ -201,7 +203,9 @@ mod native {
                     .map(|bytes| {
                         String::from_utf16_lossy(
                             &bytes
-                                .chunks_exact(2)
+                                .as_chunks::<2>()
+                                .0
+                                .iter()
                                 .map(|unit| u16::from_le_bytes([unit[0], unit[1]]))
                                 .take_while(|unit| *unit != 0)
                                 .collect::<Vec<_>>(),
