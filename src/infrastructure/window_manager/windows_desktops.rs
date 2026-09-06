@@ -10,7 +10,7 @@ fn parse_desktop_ids(bytes: &[u8]) -> Option<Vec<DesktopGuid>> {
     if bytes.is_empty() || !bytes.len().is_multiple_of(16) || bytes.len() > MAX_DESKTOPS * 16 {
         return None;
     }
-    let ids: Vec<DesktopGuid> = bytes.as_chunks::<16>().0.iter().copied().collect();
+    let ids: Vec<DesktopGuid> = bytes.as_chunks::<16>().0.to_vec();
     let mut seen = HashSet::new();
     ids.iter()
         .all(|id| *id != [0; 16] && seen.insert(*id))
