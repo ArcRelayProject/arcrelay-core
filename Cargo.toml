@@ -38,7 +38,7 @@ required-features = ["native"]
 
 [dependencies]
 arcrelay-content = { optional = true, version = "0.1.0", git = "https://github.com/ArcRelayProject/arcrelay-content.git", rev = "a4b00f20f1e03c2905abe9bae36c601fb7683e1c" }
-arcrelay-input = { version = "0.1.0", git = "https://github.com/ArcRelayProject/arcrelay-input.git", rev = "756e7c69768971436082c9b263257eba46fcf6f9" }
+arcrelay-input = { version = "0.1.0", git = "https://github.com/ArcRelayProject/arcrelay-input.git", rev = "b8bb71eafabed067dff03820349db9e4df807a63" }
 ts-rs = { version = "12", features = ["serde-json-impl", "chrono-impl", "uuid-impl", "no-serde-warnings"] }
 regex = "1"
 unicode-segmentation = "1"
