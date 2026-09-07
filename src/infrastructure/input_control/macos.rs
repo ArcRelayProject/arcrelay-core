@@ -92,6 +92,8 @@ extern "C" {
         virtual_key: u16,
         key_down: bool,
     ) -> CGEventRef;
+    fn CGEventSetFlags(event: CGEventRef, flags: u64);
+    fn CGEventSourceFlagsState(state_id: i32) -> u64;
     fn CGEventSetIntegerValueField(event: CGEventRef, field: u32, value: i64);
     fn CGEventSetDoubleValueField(event: CGEventRef, field: u32, value: f64);
     fn CGEventKeyboardSetUnicodeString(
@@ -115,6 +117,44 @@ unsafe fn post_synthetic_event(event: CGEventRef) {
     mark_synthetic_event(event);
     CGEventPost(K_CG_HID_EVENT_TAP, event);
     CFRelease(event);
+}
+
+// Paste events carry their own modifiers: a separately posted Command-down
+// can be overtaken by a physical key release before the V is delivered.
+const PASTE_COMMAND_FLAGS: u64 = (1 << 20) | 0x000008;
+const PHYSICAL_SHORTCUT_MODIFIERS: u64 = (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20);
+
+struct PasteKeyEvent(CGEventRef);
+
+impl PasteKeyEvent {
+    fn new(source: *const c_void, down: bool) -> Result<Self> {
+        unsafe {
+            let event = CGEventCreateKeyboardEvent(source, 0x09, down);
+            if event.is_null() {
+                return Err(Error::InputControl(
+                    "create paste keyboard event failed".into(),
+                ));
+            }
+            CGEventSetFlags(event, PASTE_COMMAND_FLAGS);
+            mark_synthetic_event(event);
+            Ok(Self(event))
+        }
+    }
+
+    fn post(&self) {
+        unsafe { CGEventPost(K_CG_HID_EVENT_TAP, self.0) };
+    }
+}
+
+impl Drop for PasteKeyEvent {
+    fn drop(&mut self) {
+        unsafe { CFRelease(self.0) };
+    }
+}
+
+fn physical_shortcut_modifiers() -> u64 {
+    // HID system state (1), rather than the combined synthetic session state.
+    unsafe { CGEventSourceFlagsState(1) & PHYSICAL_SHORTCUT_MODIFIERS }
 }
 
 struct InputState {
@@ -647,22 +687,23 @@ impl NativeInputControl {
             ));
         }
 
-        const HID_META: u16 = 0xE3;
-        const HID_V: u16 = 0x19;
-
-        // Match PasteGroup's proven sequence: hold Command long enough for
-        // the focused application to observe the modifier, click V, then
-        // always release Command. Sending the whole sequence without this
-        // gap is ignored intermittently by some macOS applications.
-        Self::set_key(&mut state, HID_META, true)?;
-        std::thread::sleep(Duration::from_millis(50));
-        let paste_result = Self::set_key(&mut state, HID_V, true)
-            .and_then(|_| Self::set_key(&mut state, HID_V, false));
-        let release_result = Self::set_key(&mut state, HID_META, false);
-        if paste_result.is_err() || release_result.is_err() {
-            let _ = Self::release_state(&mut state);
+        if physical_shortcut_modifiers() != 0 {
+            return Err(Error::InputControl(
+                "release shortcut modifier keys and paste again; content remains on clipboard"
+                    .into(),
+            ));
         }
-        paste_result.and(release_result)
+        // Allocate both before posting either, so allocation failure cannot
+        // leave an unmatched key-down. No global Command state is mutated.
+        let down = PasteKeyEvent::new(state.event_source(), true)?;
+        let up = PasteKeyEvent::new(state.event_source(), false)?;
+        down.post();
+        up.post();
+        tracing::debug!(
+            flags = PASTE_COMMAND_FLAGS,
+            "posted macOS clipboard paste shortcut"
+        );
+        Ok(())
     }
 }
 
@@ -720,6 +761,37 @@ impl InputControlRepository for NativeInputControl {
                 "macOS Accessibility permission is required".into(),
             ));
         }
+        let started = Instant::now();
+        let target_pid = objc2_app_kit::NSWorkspace::sharedWorkspace()
+            .frontmostApplication()
+            .map(|app| app.processIdentifier());
+        let clipboard_version = objc2_app_kit::NSPasteboard::generalPasteboard().changeCount();
+        while physical_shortcut_modifiers() != 0 {
+            if started.elapsed() >= Duration::from_millis(500) {
+                return Err(Error::InputControl(
+                    "release shortcut modifier keys and paste again; content remains on clipboard"
+                        .into(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let current_pid = objc2_app_kit::NSWorkspace::sharedWorkspace()
+            .frontmostApplication()
+            .map(|app| app.processIdentifier());
+        if target_pid.is_none()
+            || current_pid != target_pid
+            || objc2_app_kit::NSPasteboard::generalPasteboard().changeCount() != clipboard_version
+        {
+            return Err(Error::InputControl(
+                "paste target or clipboard changed; paste cancelled".into(),
+            ));
+        }
+        tracing::debug!(
+            ?target_pid,
+            clipboard_version,
+            wait_ms = started.elapsed().as_millis() as u64,
+            "macOS paste modifiers ready"
+        );
         self.input_queue
             .exec_sync(|| Self::paste_clipboard_sync(self.state.as_ref()))
     }
@@ -823,7 +895,25 @@ mod tests {
     use super::*;
 
     extern "C" {
+        fn CGEventGetFlags(event: CGEventRef) -> u64;
+        fn CGEventGetType(event: CGEventRef) -> u32;
         fn CGEventGetIntegerValueField(event: CGEventRef, field: u32) -> i64;
+    }
+
+    #[test]
+    fn paste_events_carry_command_on_both_edges_without_posting() {
+        for (down, expected_type) in [(true, 10), (false, 11)] {
+            let event = PasteKeyEvent::new(std::ptr::null(), down).unwrap();
+            unsafe {
+                assert_eq!(CGEventGetType(event.0), expected_type);
+                assert_eq!(CGEventGetFlags(event.0), PASTE_COMMAND_FLAGS);
+                assert_eq!(CGEventGetIntegerValueField(event.0, 9), 0x09);
+                assert_eq!(
+                    CGEventGetIntegerValueField(event.0, K_CG_EVENT_SOURCE_USER_DATA),
+                    macos_system_gesture::EVENT_TAG
+                );
+            }
+        }
     }
 
     #[test]
