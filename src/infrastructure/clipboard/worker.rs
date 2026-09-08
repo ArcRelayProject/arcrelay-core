@@ -68,6 +68,10 @@ pub(super) fn run_clipboard_capture_worker(worker: ClipboardCaptureWorker) {
                 .map_err(|_| Error::Clipboard("clipboard database response was dropped".into()))??
             {
                 state.current = Some(fingerprints);
+                state.selection = Some(ClipboardSelection {
+                    key: ClipboardSelectionKey::from_record(&record),
+                    applied: true,
+                });
                 let _ = sync_tx.send(record);
             }
             Ok(())
@@ -388,6 +392,51 @@ pub(super) async fn handle_database_command(
                     .await
                     .map_err(db_error),
             );
+        }
+        DbCommand::ReplicaPage(cursor, limit, response) => {
+            let _ = response.send(store.replica_page(cursor, limit).await.map_err(db_error));
+        }
+        DbCommand::ReplicaRecord(sync_id, response) => {
+            let _ = response.send(store.replica_record(&sync_id).await.map_err(db_error));
+        }
+        DbCommand::CheckReplicaStorage(replica, response) => {
+            let _ = response.send(
+                store
+                    .check_replica_storage(&replica)
+                    .await
+                    .map_err(db_error),
+            );
+        }
+        DbCommand::ReplicaSelection(response) => {
+            let _ = response.send(store.replica_selection().await.map_err(db_error));
+        }
+        DbCommand::ReplicaLabels(response) => {
+            let _ = response.send(store.replica_labels().await.map_err(db_error));
+        }
+        DbCommand::ApplyReplicaLabels(labels, response) => {
+            let result = store.apply_replica_labels(labels).await.map_err(db_error);
+            if matches!(result, Ok(count) if count > 0) {
+                let _ = change_tx.send(());
+            }
+            let _ = response.send(result);
+        }
+        DbCommand::ApplyReplica(replica, response) => {
+            let image = (replica.record.kind == ClipboardContentKind::Image
+                && !replica.record.deleted)
+                .then(|| replica.record.sync_id.clone());
+            let result = store.apply_replica_record(replica).await.map_err(db_error);
+            if matches!(result, Ok(true)) {
+                let _ = change_tx.send(());
+                if let Some(sync_id) = image {
+                    if let Ok(Some(id)) = store
+                        .ensure_image_ocr_pending(&sync_id, OCR_MODEL_VERSION, true)
+                        .await
+                    {
+                        let _ = ocr_job_tx.send(Some(OcrJob { id, urgent: false }));
+                    }
+                }
+            }
+            let _ = response.send(result);
         }
         DbCommand::ApplySync(record, response) => {
             let live_copy = record.live

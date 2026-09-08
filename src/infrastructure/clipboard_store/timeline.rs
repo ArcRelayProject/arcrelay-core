@@ -18,7 +18,7 @@ fn timeline_condition(cursor: ClipboardCursor, sort_by: ClipboardSortBy, newer: 
         .add(
             Condition::all()
                 .add(time.eq(cursor.sort_at_ms))
-                .add(clipboard_entry::Column::Id.gt(id)),
+                .add(Expr::col(clipboard_entry::Column::SyncId).gt(cursor_sync_id(id))),
         )
 }
 
@@ -36,7 +36,7 @@ async fn side<C: ConnectionTrait>(
         .filter(clipboard_entry::Column::Deleted.eq(false))
         .filter(timeline_condition(cursor, sort_by, newer))
         .order_by(sort_expression(sort_by), order.clone())
-        .order_by(clipboard_entry::Column::Id, order)
+        .order_by(clipboard_entry::Column::SyncId, order)
         .limit(limit as u64)
         .all(db)
         .await?;

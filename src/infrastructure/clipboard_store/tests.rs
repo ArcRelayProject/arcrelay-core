@@ -157,7 +157,12 @@ async fn timeline_fixture(count: usize) -> SqliteClipboardStore {
             .await
             .unwrap();
     }
-    // Deliberately identical timestamps exercise the ID tie-breaker in both
+    store
+        .db
+        .execute_unprepared("UPDATE clipboard_entries SET sync_id = printf('%064x', id)")
+        .await
+        .unwrap();
+    // Deliberately identical timestamps exercise the stable sync-ID tie-breaker in both
     // directions without timer-dependent tests.
     clipboard_entry::Entity::update_many()
         .col_expr(
@@ -1166,5 +1171,48 @@ async fn performance_clipboard_search_10000() {
     assert!(
         elapsed[95] < 500.0,
         "interactive search exceeded its latency budget"
+    );
+}
+
+#[tokio::test]
+async fn local_copy_advances_past_an_observed_peer_with_a_faster_clock() {
+    let store = SqliteClipboardStore::connect(None).await.unwrap();
+    let seed = store
+        .store(
+            ClipboardPayload::Text("remote".into()),
+            "remote-hash".into(),
+            summary(ClipboardContentKind::Text, "remote"),
+            true,
+            "peer",
+            "Peer",
+            true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let mut remote = store.replica_record(&seed.sync_id).await.unwrap().unwrap();
+    remote.record.captured_at_ms = Utc::now().timestamp_millis() + 5_000;
+    remote.record.revision += 1;
+    remote.record.live = true;
+    remote.record.change_kind = ClipboardSyncChangeKind::Copy;
+    let observed = remote.record.captured_at_ms;
+    store.apply_replica_record(remote).await.unwrap();
+    let local = store
+        .store(
+            ClipboardPayload::Text("local".into()),
+            "local-hash".into(),
+            summary(ClipboardContentKind::Text, "local"),
+            true,
+            "local",
+            "Local",
+            true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(local.captured_at_ms > observed);
+    assert_eq!(
+        store.replica_selection().await.unwrap().unwrap().sync_id,
+        local.sync_id
     );
 }

@@ -428,3 +428,23 @@ async fn relayed_copy_identity_survives_three_devices_and_reconnect() {
         2
     );
 }
+
+#[test]
+fn replica_native_write_retries_failed_selection_and_rejects_older_or_duplicate_selection() {
+    let mut state = ClipboardCaptureState::default();
+    let first = ClipboardSelectionKey(1000, "peer-a".into(), "record-a".into(), 1);
+    let latest = ClipboardSelectionKey(2000, "peer-b".into(), "record-b".into(), 1);
+    assert!(state
+        .apply_selection(first.clone(), || Err(Error::Clipboard("busy".into())))
+        .is_err());
+    assert!(state.apply_selection(first.clone(), || Ok(())).unwrap());
+    assert!(!state
+        .apply_selection(first.clone(), || panic!("duplicate must not write"))
+        .unwrap());
+    assert!(state.apply_selection(latest, || Ok(())).unwrap());
+    assert!(!state
+        .apply_selection(first, || panic!(
+            "late retry must not overwrite a newer selection"
+        ))
+        .unwrap());
+}
