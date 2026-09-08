@@ -14,6 +14,7 @@ impl MigratorTrait for Migrator {
             Box::new(super::search_index::SearchAndAccounting),
             Box::new(super::replica::ReplicaStateMigration),
             Box::new(super::replica::RepairLegacyTimelineMigration),
+            Box::new(super::retention::SeparateRetentionAccounting),
         ]
     }
 }

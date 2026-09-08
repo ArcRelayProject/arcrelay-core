@@ -881,61 +881,77 @@ impl SqliteClipboardStore {
             }
         }
 
-        let totals = db
-            .query_one(Statement::from_string(
-                sea_orm::DbBackend::Sqlite,
-                "SELECT item_count, total_bytes FROM clipboard_statistics WHERE id = 1".to_string(),
-            ))
-            .await?
-            .ok_or_else(|| DbErr::Custom("clipboard prune totals are unavailable".into()))?;
-        let mut count = totals.try_get::<i64>("", "item_count")?.max(0) as u64;
-        let mut bytes = totals.try_get::<i64>("", "total_bytes")?.max(0) as u64;
-        let max_items = u64::from(policy.max_items.max(1));
-        let max_bytes = policy.max_bytes.max(1);
-        if count <= max_items && bytes <= max_bytes {
-            return Ok(());
-        }
-
-        let models = clipboard_entry::Entity::find()
-            .filter(clipboard_entry::Column::Deleted.eq(false))
-            .filter(clipboard_entry::Column::Favorite.eq(false))
-            .filter(
-                clipboard_entry::Column::SyncId.not_in_subquery(
-                    sea_orm::sea_query::Query::select()
-                        .column(clipboard_entry_label::Column::EntrySyncId)
-                        .from(clipboard_entry_label::Entity)
-                        .and_where(clipboard_entry_label::Column::Attached.eq(true))
-                        .to_owned(),
-                ),
-            )
-            .select_only()
-            .column(clipboard_entry::Column::Id)
-            .column(clipboard_entry::Column::StorageBytes)
-            .order_by_asc(clipboard_entry::Column::CapturedAtMs)
-            .order_by_asc(clipboard_entry::Column::SyncId)
-            .limit(128)
-            .into_model::<PruneCandidate>()
-            .all(db)
-            .await?;
-        let eligible = models.len();
-        let mut delete_ids = Vec::new();
-        for model in models {
+        // Keep device-local file references out of the shared history budget.
+        // Both scopes remain bounded; tagged and favorite entries stay protected.
+        let mut budget = 128;
+        for scope in [1, 2] {
+            let totals = db
+                .query_one(Statement::from_string(
+                    sea_orm::DbBackend::Sqlite,
+                    format!("SELECT item_count, total_bytes FROM clipboard_retention_statistics WHERE scope = {scope}"),
+                ))
+                .await?
+                .ok_or_else(|| DbErr::Custom("clipboard prune totals are unavailable".into()))?;
+            let mut count = totals.try_get::<i64>("", "item_count")?.max(0) as u64;
+            let mut bytes = totals.try_get::<i64>("", "total_bytes")?.max(0) as u64;
+            let max_items = u64::from(policy.max_items.max(1));
+            let max_bytes = policy.max_bytes.max(1);
             if count <= max_items && bytes <= max_bytes {
+                continue;
+            }
+
+            let models = clipboard_entry::Entity::find()
+                .filter(if scope == 2 {
+                    clipboard_entry::Column::Kind.eq(4)
+                } else {
+                    clipboard_entry::Column::Kind.ne(4)
+                })
+                .filter(clipboard_entry::Column::Deleted.eq(false))
+                .filter(clipboard_entry::Column::Favorite.eq(false))
+                .filter(
+                    clipboard_entry::Column::SyncId.not_in_subquery(
+                        sea_orm::sea_query::Query::select()
+                            .column(clipboard_entry_label::Column::EntrySyncId)
+                            .from(clipboard_entry_label::Entity)
+                            .and_where(clipboard_entry_label::Column::Attached.eq(true))
+                            .to_owned(),
+                    ),
+                )
+                .select_only()
+                .column(clipboard_entry::Column::Id)
+                .column(clipboard_entry::Column::StorageBytes)
+                .order_by_asc(clipboard_entry::Column::CapturedAtMs)
+                .order_by_asc(clipboard_entry::Column::SyncId)
+                .limit(budget)
+                .into_model::<PruneCandidate>()
+                .all(db)
+                .await?;
+            let eligible = models.len();
+            let mut delete_ids = Vec::new();
+            for model in models {
+                if count <= max_items && bytes <= max_bytes {
+                    break;
+                }
+                delete_ids.push(model.id);
+                count = count.saturating_sub(1);
+                bytes = bytes.saturating_sub(model.storage_bytes.max(0) as u64);
+            }
+            if eligible as u64 == budget && (count > max_items || bytes > max_bytes) {
+                self.maintenance_pending
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            budget -= delete_ids.len() as u64;
+            if !delete_ids.is_empty() {
+                clipboard_entry::Entity::delete_many()
+                    .filter(clipboard_entry::Column::Id.is_in(delete_ids))
+                    .exec(db)
+                    .await?;
+            }
+            if budget == 0 {
+                self.maintenance_pending
+                    .store(true, std::sync::atomic::Ordering::Release);
                 break;
             }
-            delete_ids.push(model.id);
-            count = count.saturating_sub(1);
-            bytes = bytes.saturating_sub(model.storage_bytes.max(0) as u64);
-        }
-        if eligible == 128 && (count > max_items || bytes > max_bytes) {
-            self.maintenance_pending
-                .store(true, std::sync::atomic::Ordering::Release);
-        }
-        if !delete_ids.is_empty() {
-            clipboard_entry::Entity::delete_many()
-                .filter(clipboard_entry::Column::Id.is_in(delete_ids))
-                .exec(db)
-                .await?;
         }
         Ok(())
     }

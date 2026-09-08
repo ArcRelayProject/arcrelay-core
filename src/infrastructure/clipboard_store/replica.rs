@@ -316,7 +316,8 @@ impl SqliteClipboardStore {
             .db
             .query_one(Statement::from_string(
                 sea_orm::DbBackend::Sqlite,
-                "SELECT item_count, total_bytes FROM clipboard_statistics WHERE id=1".to_owned(),
+                "SELECT item_count, total_bytes FROM clipboard_retention_statistics WHERE scope=1"
+                    .to_owned(),
             ))
             .await?
             .ok_or_else(|| DbErr::Custom("clipboard accounting is missing".into()))?;
@@ -326,6 +327,7 @@ impl SqliteClipboardStore {
             return Ok(());
         }
         let oldest = summary_query().filter(clipboard_entry::Column::Deleted.eq(false))
+            .filter(clipboard_entry::Column::Kind.ne(4))
             .filter(clipboard_entry::Column::Favorite.eq(false))
             .filter(Expr::cust("sync_id NOT IN (SELECT entry_sync_id FROM clipboard_entry_labels WHERE attached=1)"))
             .order_by_asc(clipboard_entry::Column::CapturedAtMs).order_by_asc(clipboard_entry::Column::SyncId)

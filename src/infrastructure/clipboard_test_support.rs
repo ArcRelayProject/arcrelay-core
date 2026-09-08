@@ -11,6 +11,28 @@ pub struct TestClipboardRepository {
     events: tokio::sync::broadcast::Sender<ClipboardSyncRecord>,
 }
 impl TestClipboardRepository {
+    /// Seed an actual local capture without opening the system clipboard.
+    pub async fn store_local(
+        &self,
+        payload: ClipboardPayload,
+        content_hash: String,
+        summary: ClipboardSummary,
+    ) -> Result<()> {
+        self.store
+            .store(
+                payload,
+                content_hash,
+                summary,
+                true,
+                "fixture",
+                "Fixture",
+                false,
+            )
+            .await
+            .map_err(db_error)?;
+        Ok(())
+    }
+
     pub async fn open(path: Option<&Path>) -> Result<Self> {
         Ok(Self {
             store: SqliteClipboardStore::connect(path)

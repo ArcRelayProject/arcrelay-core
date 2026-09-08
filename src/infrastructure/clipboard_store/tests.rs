@@ -1292,3 +1292,193 @@ async fn local_copy_advances_past_an_observed_peer_with_a_faster_clock() {
         local.sync_id
     );
 }
+
+#[tokio::test]
+async fn local_file_retention_cannot_evict_shared_history_and_remains_bounded() {
+    let store = SqliteClipboardStore::connect(None).await.unwrap();
+    let mut policy = store.policy().await.unwrap();
+    policy.retention_days = 0;
+    policy.max_items = 2;
+    store.update_policy(policy).await.unwrap();
+    for index in 0..2 {
+        store
+            .store(
+                ClipboardPayload::Text(format!("shared {index}")),
+                format!("shared-{index}"),
+                summary(ClipboardContentKind::Text, "shared"),
+                true,
+                "local",
+                "Local",
+                true,
+            )
+            .await
+            .unwrap();
+    }
+    let shared = store.replica_page(None, 10).await.unwrap();
+    for index in 0..4 {
+        store
+            .store(
+                ClipboardPayload::Files(vec![format!("/local/file-{index}")]),
+                format!("file-{index}"),
+                summary(ClipboardContentKind::Files, "file"),
+                true,
+                "local",
+                "Local",
+                false,
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        store.replica_page(None, 10).await.unwrap().records,
+        shared.records
+    );
+    let history = store.history(ClipboardQuery::recent(10)).await.unwrap();
+    assert_eq!(history.entries.len(), 4);
+    assert_eq!(
+        history
+            .entries
+            .iter()
+            .filter(|r| r.kind == ClipboardContentKind::Files)
+            .count(),
+        2
+    );
+    let totals = store
+        .db
+        .query_one(Statement::from_string(
+            sea_orm::DbBackend::Sqlite,
+            "SELECT SUM(item_count) AS count FROM clipboard_retention_statistics".to_string(),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(totals.try_get::<i64>("", "count").unwrap(), 4);
+    // Deletion and clearing maintain both accounting scopes and the UI total.
+    store.delete(history.entries[0].id, "local").await.unwrap();
+    store.clear().await.unwrap();
+    assert_eq!(
+        SqliteClipboardStore::item_count(&store.db).await.unwrap(),
+        0
+    );
+    let totals = store.db.query_one(Statement::from_string(sea_orm::DbBackend::Sqlite,
+        "SELECT SUM(item_count) AS count, SUM(total_bytes) AS bytes FROM clipboard_retention_statistics".to_string())).await.unwrap().unwrap();
+    assert_eq!(totals.try_get::<i64>("", "count").unwrap(), 0);
+    assert_eq!(totals.try_get::<i64>("", "bytes").unwrap(), 0);
+}
+
+#[test]
+fn retention_scope_migration_preserves_existing_history_without_a_runtime_context() {
+    use sea_orm_migration::{MigrationTrait, SchemaManager};
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("retention-scopes.sqlite3");
+        let store = SqliteClipboardStore::connect(Some(&path)).await.unwrap();
+        store.store(ClipboardPayload::Text("preserved".into()), "preserved".into(),
+            summary(ClipboardContentKind::Text, "preserved"), true, "local", "Local", true).await.unwrap();
+        store.store(ClipboardPayload::Files(vec!["/local/path".into()]), "local-file".into(),
+            summary(ClipboardContentKind::Files, "file"), true, "local", "Local", false).await.unwrap();
+        retention::SeparateRetentionAccounting.down(&SchemaManager::new(&store.db)).await.unwrap();
+        store.db.execute_unprepared("DELETE FROM seaql_migrations WHERE version='m20260909_separate_clipboard_retention_scopes_v12'").await.unwrap();
+        let before = store.history(ClipboardQuery::recent(10)).await.unwrap();
+        let selection = store.replica_selection().await.unwrap();
+        let revision = store.revision().await.unwrap();
+        drop(store);
+        let store = SqliteClipboardStore::connect(Some(&path)).await.unwrap();
+        assert_eq!(store.history(ClipboardQuery::recent(10)).await.unwrap(), before);
+        assert_eq!(store.replica_selection().await.unwrap(), selection);
+        assert_eq!(store.revision().await.unwrap(), revision + 1);
+        let totals = store.db.query_all(Statement::from_string(sea_orm::DbBackend::Sqlite,
+            "SELECT scope,item_count,total_bytes FROM clipboard_retention_statistics ORDER BY scope".to_string())).await.unwrap();
+        assert_eq!(totals.len(), 2);
+        for row in totals { assert_eq!(row.try_get::<i64>("", "item_count").unwrap(), 1); assert!(row.try_get::<i64>("", "total_bytes").unwrap() > 0); }
+        drop(store);
+        let store = SqliteClipboardStore::connect(Some(&path)).await.unwrap();
+        assert_eq!(store.revision().await.unwrap(), revision + 1);
+    });
+}
+
+#[tokio::test]
+async fn local_file_byte_budget_does_not_reduce_shared_content_capacity() {
+    let store = SqliteClipboardStore::connect(None).await.unwrap();
+    let text = "x".repeat(60);
+    store
+        .store(
+            ClipboardPayload::Text(text.clone()),
+            "shared-bytes".into(),
+            summary(ClipboardContentKind::Text, &text),
+            true,
+            "local",
+            "Local",
+            true,
+        )
+        .await
+        .unwrap();
+    store
+        .store(
+            ClipboardPayload::Files(vec![format!("/{}-0", "f".repeat(128))]),
+            "file-bytes-0".into(),
+            summary(ClipboardContentKind::Files, "file"),
+            true,
+            "local",
+            "Local",
+            true,
+        )
+        .await
+        .unwrap();
+    let shared = store.replica_page(None, 10).await.unwrap().records;
+    let totals = store
+        .db
+        .query_one(Statement::from_string(
+            sea_orm::DbBackend::Sqlite,
+            "SELECT MAX(total_bytes) AS bytes FROM clipboard_retention_statistics".to_string(),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    let limit = totals.try_get::<i64>("", "bytes").unwrap();
+    let mut policy = store.policy().await.unwrap();
+    policy.retention_days = 0;
+    policy.max_items = 100;
+    policy.max_bytes = limit as u64;
+    store.update_policy(policy).await.unwrap();
+    for index in 1..4 {
+        let path = format!("/{}-{index}", "f".repeat(128));
+        store
+            .store(
+                ClipboardPayload::Files(vec![path]),
+                format!("file-bytes-{index}"),
+                summary(ClipboardContentKind::Files, "file"),
+                true,
+                "local",
+                "Local",
+                true,
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(store.replica_page(None, 10).await.unwrap().records, shared);
+    assert_eq!(
+        store
+            .history(ClipboardQuery::recent(10))
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        2
+    );
+    let totals = store.db.query_all(Statement::from_string(sea_orm::DbBackend::Sqlite,
+        "SELECT s.item_count, s.total_bytes, COUNT(e.id) AS actual_count, COALESCE(SUM(e.storage_bytes),0) AS actual_bytes FROM clipboard_retention_statistics s LEFT JOIN clipboard_entries e ON e.deleted=0 AND s.scope=CASE WHEN e.kind=4 THEN 2 ELSE 1 END GROUP BY s.scope ORDER BY s.scope".to_string())).await.unwrap();
+    for row in totals {
+        assert_eq!(
+            row.try_get::<i64>("", "item_count").unwrap(),
+            row.try_get::<i64>("", "actual_count").unwrap()
+        );
+        let bytes = row.try_get::<i64>("", "total_bytes").unwrap();
+        assert_eq!(bytes, row.try_get::<i64>("", "actual_bytes").unwrap());
+        assert!(bytes <= limit);
+    }
+}

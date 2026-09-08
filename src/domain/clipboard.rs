@@ -278,7 +278,9 @@ pub struct ClipboardTimelinePage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClipboardPolicy {
     pub history_enabled: bool,
+    /// Soft item limit for each of shared content and device-local file history.
     pub max_items: u32,
+    /// Soft byte limit per history scope; local file paths cannot evict shared content.
     pub max_bytes: u64,
     /// Zero means no age-based expiration.
     pub retention_days: u32,

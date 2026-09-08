@@ -3,6 +3,7 @@ mod migration;
 mod ocr;
 mod records;
 mod replica;
+mod retention;
 mod search_index;
 mod sync;
 mod timeline;
