@@ -140,6 +140,37 @@ fn platforms_without_markers_keep_bounded_concurrent_write_suppression() {
 }
 
 #[test]
+fn rustdesk_echoes_do_not_refresh_history_but_new_remote_and_local_copies_work() {
+    let mut state = ClipboardCaptureState::default();
+    let now = Instant::now();
+    let written = clipboard_fingerprints(&ClipboardPayload::RichText {
+        html: "<b>shared</b>".into(),
+        plain_text: "shared\r\ncontent".into(),
+        rtf: None,
+    });
+    let echoed = clipboard_fingerprints(&ClipboardPayload::Text("shared\ncontent".into()));
+    state.remember_write(written, now);
+    // Delayed repeated writes outlive the fallback TTL and can arrive on either
+    // a platform with our native marker or a platform using write fingerprints.
+    for native_markers in [false, true] {
+        for seconds in 0..40 {
+            assert!(!state.accepts(
+                &echoed,
+                NativeClipboardOrigin::RustDesk,
+                native_markers,
+                now + Duration::from_secs(seconds),
+            ));
+        }
+    }
+    assert!(state.accepts(&echoed, NativeClipboardOrigin::Local, true, now));
+    let new = clipboard_fingerprints(&ClipboardPayload::Text("new remote copy".into()));
+    assert!(state.accepts(&new, NativeClipboardOrigin::RustDesk, true, now));
+    state.current = Some(new.clone());
+    assert!(!state.accepts(&new, NativeClipboardOrigin::RustDesk, true, now));
+    assert!(state.accepts(&echoed, NativeClipboardOrigin::RustDesk, true, now));
+}
+
+#[test]
 fn local_source_device_is_not_presented_as_remote() {
     let mut summary = summarize(&ClipboardPayload::Text("local".into()), None);
     summary.source_device_id = Some("local-device".into());
@@ -321,7 +352,7 @@ async fn remote_capture_events_exclude_history_and_duplicate_sync() {
 }
 
 #[test]
-fn handoff_image_fingerprint_ignores_png_encoding_but_preserves_pixels() {
+fn external_relay_image_fingerprint_ignores_png_encoding_but_preserves_pixels() {
     fn png_payload(note: &str, pixel: [u8; 4]) -> ClipboardPayload {
         let mut bytes = Vec::new();
         {
@@ -352,18 +383,13 @@ fn handoff_image_fingerprint_ignores_png_encoding_but_preserves_pixels() {
         current: Some(original),
         ..Default::default()
     };
-    assert!(!state.accepts(
-        &reencoded,
+    for origin in [
         NativeClipboardOrigin::Handoff,
-        true,
-        Instant::now()
-    ));
-    assert!(state.accepts(
-        &different,
-        NativeClipboardOrigin::Handoff,
-        true,
-        Instant::now()
-    ));
+        NativeClipboardOrigin::RustDesk,
+    ] {
+        assert!(!state.accepts(&reencoded, origin, true, Instant::now()));
+        assert!(state.accepts(&different, origin, true, Instant::now()));
+    }
 }
 
 #[tokio::test]
@@ -427,4 +453,24 @@ async fn relayed_copy_identity_survives_three_devices_and_reconnect() {
         third.current_summary().await.unwrap().unwrap().copy_count,
         2
     );
+}
+
+#[test]
+fn replica_native_write_retries_failed_selection_and_rejects_older_or_duplicate_selection() {
+    let mut state = ClipboardCaptureState::default();
+    let first = ClipboardSelectionKey(1000, "peer-a".into(), "record-a".into(), 1);
+    let latest = ClipboardSelectionKey(2000, "peer-b".into(), "record-b".into(), 1);
+    assert!(state
+        .apply_selection(first.clone(), || Err(Error::Clipboard("busy".into())))
+        .is_err());
+    assert!(state.apply_selection(first.clone(), || Ok(())).unwrap());
+    assert!(!state
+        .apply_selection(first.clone(), || panic!("duplicate must not write"))
+        .unwrap());
+    assert!(state.apply_selection(latest, || Ok(())).unwrap());
+    assert!(!state
+        .apply_selection(first, || panic!(
+            "late retry must not overwrite a newer selection"
+        ))
+        .unwrap());
 }

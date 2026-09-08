@@ -2,6 +2,8 @@ mod entity;
 mod migration;
 mod ocr;
 mod records;
+mod replica;
+mod retention;
 mod search_index;
 mod sync;
 mod timeline;
@@ -22,6 +24,10 @@ use sea_orm::{
 use sea_orm_migration::MigratorTrait;
 use sha2::{Digest, Sha256};
 use xxhash_rust::xxh3::Xxh3;
+
+use crate::domain::clipboard::{
+    ClipboardReplicaCursor, ClipboardReplicaPage, ClipboardReplicaRecord,
+};
 
 use crate::domain::clipboard::{
     ClipboardContentKind, ClipboardCursor, ClipboardImageOcr, ClipboardLabel,
@@ -440,8 +446,14 @@ fn cursor_condition(cursor: ClipboardCursor, sort_by: ClipboardSortBy) -> Condit
         .add(
             Condition::all()
                 .add(sort_expression.eq(cursor.sort_at_ms))
-                .add(clipboard_entry::Column::Id.lt(id)),
+                .add(Expr::col(clipboard_entry::Column::SyncId).lt(cursor_sync_id(id))),
         )
+}
+
+// Public legacy cursors address a local row; resolve its replicated identity
+// for the tie-break so insertion order on another device cannot reorder history.
+fn cursor_sync_id(id: i64) -> SimpleExpr {
+    Expr::cust_with_values("(SELECT sync_id FROM clipboard_entries WHERE id = ?)", [id])
 }
 
 fn sort_expression(sort_by: ClipboardSortBy) -> SimpleExpr {

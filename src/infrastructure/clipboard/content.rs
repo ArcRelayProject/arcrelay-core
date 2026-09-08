@@ -51,7 +51,29 @@ pub(super) fn hide_local_source_device(summary: &mut ClipboardSummary, local_dev
 pub(super) enum NativeClipboardOrigin {
     Local,
     Handoff,
+    RustDesk,
     ArcRelay,
+}
+
+// RustDesk attaches this format to remote writes on all desktop platforms.
+// See rustdesk/rustdesk src/clipboard.rs, append_owner_marker.
+pub(super) const RUSTDESK_MARKER: &str = "dyn.com.rustdesk.owner";
+
+pub(super) fn external_clipboard_origin(context: &ClipboardContext) -> NativeClipboardOrigin {
+    external_origin_for_formats(&context.available_formats().unwrap_or_default())
+}
+
+fn external_origin_for_formats(formats: &[String]) -> NativeClipboardOrigin {
+    if formats
+        .iter()
+        .any(|format| format == "com.apple.is-remote-clipboard")
+    {
+        NativeClipboardOrigin::Handoff
+    } else if formats.iter().any(|format| format == RUSTDESK_MARKER) {
+        NativeClipboardOrigin::RustDesk
+    } else {
+        NativeClipboardOrigin::Local
+    }
 }
 
 impl ClipboardFingerprints {
@@ -80,7 +102,7 @@ impl ClipboardCaptureState {
             .retain(|(_, at)| now.duration_since(*at) <= SUPPRESSION_TTL);
         match origin {
             NativeClipboardOrigin::ArcRelay => false,
-            NativeClipboardOrigin::Handoff => !self
+            NativeClipboardOrigin::Handoff | NativeClipboardOrigin::RustDesk => !self
                 .current
                 .as_ref()
                 .is_some_and(|last| last.matches(fingerprints)),
@@ -213,13 +235,17 @@ pub(super) fn detect_source_application(
     context: &ClipboardContext,
     source_provider: &dyn WindowManagerRepository,
 ) -> Option<String> {
-    #[cfg(target_os = "macos")]
-    if context.available_formats().is_ok_and(|formats| {
-        formats
-            .iter()
-            .any(|format| format == "com.apple.is-remote-clipboard")
-    }) {
-        return Some("Apple Handoff".into());
+    source_application_for_origin(external_clipboard_origin(context), source_provider)
+}
+
+pub(super) fn source_application_for_origin(
+    origin: NativeClipboardOrigin,
+    source_provider: &dyn WindowManagerRepository,
+) -> Option<String> {
+    match origin {
+        NativeClipboardOrigin::Handoff => return Some("Apple Handoff".into()),
+        NativeClipboardOrigin::RustDesk => return Some("RustDesk".into()),
+        _ => {}
     }
     source_provider
         .focused_app_name_now()
@@ -642,4 +668,29 @@ pub(super) fn semantic_hash(payload: &ClipboardPayload) -> String {
 pub(super) fn update_normalized_text(digest: &mut Xxh3, text: &str) {
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     digest.update(normalized.as_bytes());
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+
+    #[test]
+    fn external_origin_detection_is_exact_and_needs_no_runtime() {
+        assert_eq!(
+            external_origin_for_formats(&[]),
+            NativeClipboardOrigin::Local
+        );
+        assert_eq!(
+            external_origin_for_formats(&["public.png".into(), RUSTDESK_MARKER.into()]),
+            NativeClipboardOrigin::RustDesk
+        );
+        assert_eq!(
+            external_origin_for_formats(&["not.dyn.com.rustdesk.owner".into()]),
+            NativeClipboardOrigin::Local
+        );
+        assert_eq!(
+            external_origin_for_formats(&["com.apple.is-remote-clipboard".into()]),
+            NativeClipboardOrigin::Handoff
+        );
+    }
 }
