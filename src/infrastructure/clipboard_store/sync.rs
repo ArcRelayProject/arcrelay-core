@@ -696,6 +696,8 @@ impl SqliteClipboardStore {
             active.search_text = Set(search_text);
             active.source_app = Set(summary.source_app);
             active.captured_at_ms = Set(captured_at_ms);
+            active.first_captured_at_ms =
+                Set((*active.first_captured_at_ms.as_ref()).min(captured_at_ms));
             active.updated_at_ms = Set(updated_at_ms);
             active.copy_count = Set(timeline.map_or_else(
                 || active.copy_count.as_ref().saturating_add(1),

@@ -141,7 +141,9 @@ fn replica_metadata(
     memberships: Vec<ClipboardLabelMembership>,
 ) -> Result<ClipboardReplicaRecord, DbErr> {
     Ok(ClipboardReplicaRecord {
-        first_captured_at_ms: model.first_captured_at_ms,
+        // Older v1 imports could move the last copy before the local first
+        // capture. Keep exports valid even while a legacy peer is connected.
+        first_captured_at_ms: model.first_captured_at_ms.min(model.captured_at_ms),
         copy_count: model.copy_count.max(1) as u32,
         record: ClipboardSyncRecord {
             sync_id: model.sync_id.clone(),
@@ -170,6 +172,35 @@ fn replica_metadata(
             text_syntax: decode_text_syntax(&model.text_syntax)?,
         },
     })
+}
+
+pub(super) struct RepairLegacyTimelineMigration;
+impl sea_orm_migration::MigrationName for RepairLegacyTimelineMigration {
+    fn name(&self) -> &str {
+        "m20260908_repair_legacy_clipboard_timeline_v11"
+    }
+}
+#[async_trait::async_trait]
+impl sea_orm_migration::MigrationTrait for RepairLegacyTimelineMigration {
+    async fn up(&self, manager: &sea_orm_migration::SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(
+                "UPDATE clipboard_state SET revision = revision + 1 WHERE EXISTS (
+                SELECT 1 FROM clipboard_entries
+                WHERE captured_at_ms > 0 AND first_captured_at_ms > captured_at_ms);
+             UPDATE clipboard_entries SET first_captured_at_ms = captured_at_ms
+             WHERE captured_at_ms > 0 AND first_captured_at_ms > captured_at_ms;",
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &sea_orm_migration::SchemaManager) -> Result<(), DbErr> {
+        // Repaired timestamps are valid for both schema versions. Their former
+        // invalid values must not be reconstructed during a downgrade.
+        Ok(())
+    }
 }
 
 // A single durable selection is enough: newer live copies supersede older

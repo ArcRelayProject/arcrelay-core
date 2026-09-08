@@ -1,5 +1,81 @@
 use super::*;
 
+#[test]
+fn legacy_timeline_migration_preserves_history_and_runs_from_a_plain_thread() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy-timeline.sqlite3");
+        let store = SqliteClipboardStore::connect(Some(&path)).await.unwrap();
+        let seed = store.store(
+            ClipboardPayload::Text("preserved legacy content".into()),
+            "legacy-timeline-fixture".into(),
+            summary(ClipboardContentKind::Text, "preserved legacy content"),
+            true, "local", "Local", true,
+        ).await.unwrap().unwrap();
+        store.db.execute_unprepared(
+            "UPDATE clipboard_entries SET first_captured_at_ms = captured_at_ms + 5000,
+                copy_count = 9, favorite = 1;
+             DELETE FROM seaql_migrations WHERE version = 'm20260908_repair_legacy_clipboard_timeline_v11';",
+        ).await.unwrap();
+        let revision = store.revision().await.unwrap();
+        drop(store);
+
+        let reopened = SqliteClipboardStore::connect(Some(&path)).await.unwrap();
+        let record = reopened.replica_record(&seed.sync_id).await.unwrap().unwrap();
+        assert_eq!(record.first_captured_at_ms, seed.captured_at_ms);
+        assert_eq!(record.record.captured_at_ms, seed.captured_at_ms);
+        assert_eq!(record.copy_count, 9);
+        assert_eq!(record.record.text, seed.text);
+        assert_eq!(record.record.revision, seed.revision);
+        assert!(record.record.favorite);
+        assert_eq!(reopened.revision().await.unwrap(), revision + 1);
+        let history = reopened.history(ClipboardQuery::recent(10)).await.unwrap();
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.entries[0].first_captured_at, history.entries[0].captured_at);
+        drop(reopened);
+        let reopened = SqliteClipboardStore::connect(Some(&path)).await.unwrap();
+        assert_eq!(reopened.revision().await.unwrap(), revision + 1);
+    });
+}
+
+#[tokio::test]
+async fn legacy_copy_older_than_local_creation_keeps_a_valid_replica_timeline() {
+    let store = SqliteClipboardStore::connect(None).await.unwrap();
+    let mut record = store
+        .store(
+            ClipboardPayload::Text("legacy copy".into()),
+            "legacy-copy-fixture".into(),
+            summary(ClipboardContentKind::Text, "legacy copy"),
+            true,
+            "local",
+            "Local",
+            true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    record.captured_at_ms -= 5000;
+    record.revision += 1;
+    record.updated_by_device_id = "peer".into();
+    record.live = false;
+    let id = record.sync_id.clone();
+    let captured = record.captured_at_ms;
+    assert!(store.apply_sync_record(record).await.unwrap());
+    let history = store.history(ClipboardQuery::recent(10)).await.unwrap();
+    assert_eq!(
+        history.entries[0].first_captured_at.timestamp_millis(),
+        captured
+    );
+    assert_eq!(history.entries[0].captured_at.timestamp_millis(), captured);
+    let replica = store.replica_record(&id).await.unwrap().unwrap();
+    assert_eq!(replica.first_captured_at_ms, captured);
+    assert_eq!(replica.record.captured_at_ms, captured);
+}
+
 #[tokio::test]
 async fn indexed_search_keeps_literal_cjk_and_punctuation_semantics() {
     let store = SqliteClipboardStore::connect(None).await.unwrap();

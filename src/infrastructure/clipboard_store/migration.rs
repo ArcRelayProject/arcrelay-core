@@ -13,6 +13,7 @@ impl MigratorTrait for Migrator {
             Box::new(AddClipboardOcrCharacterAlignmentV8),
             Box::new(super::search_index::SearchAndAccounting),
             Box::new(super::replica::ReplicaStateMigration),
+            Box::new(super::replica::RepairLegacyTimelineMigration),
         ]
     }
 }
