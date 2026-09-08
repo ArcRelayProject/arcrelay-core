@@ -1,6 +1,10 @@
 use std::sync::{Arc, RwLock};
 
 use crate::domain::clipboard::{
+    ClipboardReplicaCursor, ClipboardReplicaPage, ClipboardReplicaRecord,
+};
+
+use crate::domain::clipboard::{
     ClipboardContentKind, ClipboardImageOcr, ClipboardLabel, ClipboardPage, ClipboardPasteMode,
     ClipboardPolicy, ClipboardQuery, ClipboardRepository, ClipboardSummary, ClipboardSyncPage,
     ClipboardSyncPreferences, ClipboardSyncRecord, ClipboardTimelinePage, ClipboardTimelineQuery,
@@ -246,6 +250,91 @@ impl ClipboardApplicationService {
         }
         self.repository
             .apply_sync_record(record, preferences.update_system_clipboard, relay_change)
+            .await
+    }
+
+    pub async fn replica_page(
+        &self,
+        cursor: Option<ClipboardReplicaCursor>,
+        limit: usize,
+    ) -> Result<ClipboardReplicaPage> {
+        self.repository.replica_page(cursor, limit).await
+    }
+
+    pub async fn replica_record(&self, sync_id: &str) -> Result<Option<ClipboardReplicaRecord>> {
+        self.repository.replica_record(sync_id).await
+    }
+
+    pub async fn check_replica_storage(&self, replica: &ClipboardReplicaRecord) -> Result<()> {
+        self.repository.check_replica_storage(replica).await
+    }
+
+    pub async fn replica_selection(&self) -> Result<Option<ClipboardSyncRecord>> {
+        self.repository.replica_selection().await
+    }
+
+    pub async fn replica_labels(&self) -> Result<Vec<ClipboardLabel>> {
+        self.repository.replica_labels().await
+    }
+
+    pub async fn apply_replica_labels(&self, labels: Vec<ClipboardLabel>) -> Result<usize> {
+        if !self.sync_preferences().enabled {
+            return Err(crate::Error::Clipboard(
+                "clipboard synchronization is disabled".into(),
+            ));
+        }
+        self.repository.apply_replica_labels(labels).await
+    }
+
+    pub async fn apply_replica_record(&self, mut replica: ClipboardReplicaRecord) -> Result<bool> {
+        let preferences = self.sync_preferences();
+        if !self.should_send_sync_record(&replica.record) {
+            return Err(crate::Error::Clipboard(
+                "clipboard synchronization is disabled for this change".into(),
+            ));
+        }
+        // A snapshot cannot bypass preferences for already existing records.
+        if let Some(current) = self
+            .repository
+            .replica_record(&replica.record.sync_id)
+            .await?
+        {
+            if !preferences.sync_edits_and_deletes
+                && (
+                    replica.record.revision,
+                    &replica.record.updated_by_device_id,
+                ) > (
+                    current.record.revision,
+                    &current.record.updated_by_device_id,
+                )
+                && (replica.record.deleted != current.record.deleted
+                    || replica.record.text != current.record.text
+                    || replica.record.html != current.record.html
+                    || replica.record.rtf != current.record.rtf
+                    || replica.record.image_png != current.record.image_png)
+            {
+                return Err(crate::Error::Clipboard(
+                    "clipboard edits and deletes synchronization is disabled".into(),
+                ));
+            }
+            if !preferences.sync_favorites {
+                replica.record.favorite = current.record.favorite;
+                replica.record.favorite_revision = current.record.favorite_revision;
+                replica.record.favorite_updated_by_device_id =
+                    current.record.favorite_updated_by_device_id;
+            }
+        } else {
+            if replica.record.deleted && !preferences.sync_edits_and_deletes {
+                return Err(crate::Error::Clipboard(
+                    "clipboard deletes synchronization is disabled".into(),
+                ));
+            }
+            if !preferences.sync_favorites {
+                replica.record.favorite = false;
+            }
+        }
+        self.repository
+            .apply_replica_record(replica, preferences.update_system_clipboard)
             .await
     }
 

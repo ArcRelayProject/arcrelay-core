@@ -43,6 +43,8 @@ fn stamp_for(board: &NSPasteboard) -> Stamp {
             NativeClipboardOrigin::ArcRelay
         } else if has(HANDOFF_MARKER) {
             NativeClipboardOrigin::Handoff
+        } else if has(RUSTDESK_MARKER) {
+            NativeClipboardOrigin::RustDesk
         } else {
             NativeClipboardOrigin::Local
         },
@@ -283,6 +285,35 @@ mod tests {
                     .to_vec(),
                 "<p>Hello <b>世界</b></p>".as_bytes()
             );
+            board.clearContents();
+        });
+    }
+
+    #[test]
+    fn rustdesk_marker_in_a_separate_item_identifies_remote_writes() {
+        autoreleasepool(|_| {
+            let board = NSPasteboard::pasteboardWithUniqueName();
+            let owner = NSPasteboardItem::new();
+            owner.setData_forType(
+                &NSData::with_bytes(&[1]),
+                &NSString::from_str(RUSTDESK_MARKER),
+            );
+            let content = NSPasteboardItem::new();
+            content.setString_forType(&NSString::from_str("remote content"), unsafe {
+                NSPasteboardTypeString
+            });
+            board.clearContents();
+            assert!(board.writeObjects(&NSArray::from_retained_slice(&[
+                ProtocolObject::from_retained(owner),
+                ProtocolObject::from_retained(content),
+            ])));
+            assert_eq!(stamp_for(&board).origin, NativeClipboardOrigin::RustDesk);
+            // An explicit application copy removes the relay marker.
+            board.clearContents();
+            board.setString_forType(&NSString::from_str("remote content"), unsafe {
+                NSPasteboardTypeString
+            });
+            assert_eq!(stamp_for(&board).origin, NativeClipboardOrigin::Local);
             board.clearContents();
         });
     }

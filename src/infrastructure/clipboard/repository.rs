@@ -131,7 +131,13 @@ impl ClipboardRepository for NativeClipboard {
             (payload, mode) => convert_payload(&payload, mode)?,
         };
         let kind = payload_kind(&payload);
-        self.write_system_clipboard(payload, false)?;
+        self.write_system_clipboard(payload.clone(), false)?;
+        if let Some(record) = self
+            .store_payload(payload, Some("ArcRelay".into()), true)
+            .await?
+        {
+            let _ = self.sync_tx.send(record);
+        }
         Ok(kind)
     }
 
@@ -299,6 +305,73 @@ impl ClipboardRepository for NativeClipboard {
             let _ = self.sync_tx.send(record);
         }
         Ok(true)
+    }
+
+    async fn replica_page(
+        &self,
+        cursor: Option<ClipboardReplicaCursor>,
+        limit: usize,
+    ) -> Result<ClipboardReplicaPage> {
+        self.request(|response| DbCommand::ReplicaPage(cursor, limit, response))
+            .await
+    }
+
+    async fn replica_record(&self, sync_id: &str) -> Result<Option<ClipboardReplicaRecord>> {
+        self.request(|response| DbCommand::ReplicaRecord(sync_id.to_owned(), response))
+            .await
+    }
+
+    async fn check_replica_storage(&self, replica: &ClipboardReplicaRecord) -> Result<()> {
+        self.request(|response| DbCommand::CheckReplicaStorage(replica.clone(), response))
+            .await
+    }
+    async fn replica_selection(&self) -> Result<Option<ClipboardSyncRecord>> {
+        self.request(DbCommand::ReplicaSelection).await
+    }
+
+    async fn replica_labels(&self) -> Result<Vec<ClipboardLabel>> {
+        self.request(DbCommand::ReplicaLabels).await
+    }
+
+    async fn apply_replica_labels(&self, labels: Vec<ClipboardLabel>) -> Result<usize> {
+        self.request(|response| DbCommand::ApplyReplicaLabels(labels, response))
+            .await
+    }
+
+    async fn apply_replica_record(
+        &self,
+        replica: ClipboardReplicaRecord,
+        update_system_clipboard: bool,
+    ) -> Result<bool> {
+        let record = replica.record.clone();
+        let live =
+            record.live && record.change_kind == ClipboardSyncChangeKind::Copy && !record.deleted;
+        let payload = (live && update_system_clipboard)
+            .then(|| sync_payload(&record))
+            .transpose()?;
+        let changed = self
+            .request(|response| DbCommand::ApplyReplica(replica, response))
+            .await?;
+        if changed {
+            let _ = self.sync_tx.send(record.clone());
+            if live {
+                let _ = self.capture_tx.send(ClipboardCaptureEvent {
+                    origin: ClipboardCaptureOrigin::Remote,
+                    occurred_at: Instant::now(),
+                });
+            }
+        }
+        // A previously committed record may still need its native write retried.
+        if let Some(payload) = payload {
+            let selected = self.replica_selection().await?;
+            if selected.is_some_and(|selected| {
+                ClipboardSelectionKey::from_record(&selected)
+                    == ClipboardSelectionKey::from_record(&record)
+            }) {
+                self.write_replica_clipboard(&record, payload)?;
+            }
+        }
+        Ok(changed)
     }
 
     async fn edit_text(&self, id: u64, content: &str) -> Result<()> {

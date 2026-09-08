@@ -17,6 +17,10 @@ use tracing::{debug, warn};
 use xxhash_rust::xxh3::Xxh3;
 
 use crate::domain::clipboard::{
+    ClipboardReplicaCursor, ClipboardReplicaPage, ClipboardReplicaRecord,
+};
+
+use crate::domain::clipboard::{
     ClipboardCaptureEvent, ClipboardCaptureOrigin, ClipboardContentKind, ClipboardImageOcr,
     ClipboardLabel, ClipboardPage, ClipboardPasteMode, ClipboardPayload, ClipboardPolicy,
     ClipboardQuery, ClipboardRepository, ClipboardSummary, ClipboardSyncChangeKind,
@@ -49,8 +53,52 @@ struct ClipboardFingerprints {
 struct ClipboardCaptureState {
     // The currently observed content has no timeout: Handoff may arrive late.
     current: Option<ClipboardFingerprints>,
+    selection: Option<ClipboardSelection>,
     // Platforms without native origin markers retain the short write fallback.
     writes: VecDeque<(ClipboardFingerprints, Instant)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ClipboardSelectionKey(i64, String, String, u64);
+
+impl ClipboardSelectionKey {
+    fn from_record(record: &ClipboardSyncRecord) -> Self {
+        Self(
+            record.captured_at_ms,
+            record.updated_by_device_id.clone(),
+            record.sync_id.clone(),
+            record.revision,
+        )
+    }
+}
+
+struct ClipboardSelection {
+    key: ClipboardSelectionKey,
+    applied: bool,
+}
+
+impl ClipboardCaptureState {
+    fn apply_selection(
+        &mut self,
+        key: ClipboardSelectionKey,
+        write: impl FnOnce() -> Result<()>,
+    ) -> Result<bool> {
+        if self.selection.as_ref().is_some_and(|selection| {
+            selection.key > key || (selection.key == key && selection.applied)
+        }) {
+            return Ok(false);
+        }
+        self.selection = Some(ClipboardSelection {
+            key,
+            applied: false,
+        });
+        write()?;
+        self.selection
+            .as_mut()
+            .expect("selection set before write")
+            .applied = true;
+        Ok(true)
+    }
 }
 
 type SharedCaptureState = Arc<Mutex<ClipboardCaptureState>>;
@@ -126,6 +174,17 @@ enum DbCommand {
     SyncRecords(u64, usize, DbResponse<ClipboardSyncPage>),
     SyncRecordRequiresPayload(String, u64, String, DbResponse<bool>),
     ApplySync(ClipboardSyncRecord, DbResponse<bool>),
+    ReplicaPage(
+        Option<ClipboardReplicaCursor>,
+        usize,
+        DbResponse<ClipboardReplicaPage>,
+    ),
+    ReplicaRecord(String, DbResponse<Option<ClipboardReplicaRecord>>),
+    ReplicaLabels(DbResponse<Vec<ClipboardLabel>>),
+    ReplicaSelection(DbResponse<Option<ClipboardSyncRecord>>),
+    CheckReplicaStorage(ClipboardReplicaRecord, DbResponse<()>),
+    ApplyReplicaLabels(Vec<ClipboardLabel>, DbResponse<usize>),
+    ApplyReplica(ClipboardReplicaRecord, DbResponse<bool>),
     EditText(u64, String, String, DbResponse<Option<ClipboardSyncRecord>>),
 }
 
@@ -146,6 +205,11 @@ impl DbCommand {
                 | Self::HtmlPayload(..)
                 | Self::Policy(_)
                 | Self::Labels(_)
+                | Self::ReplicaPage(..)
+                | Self::ReplicaRecord(..)
+                | Self::ReplicaLabels(..)
+                | Self::ReplicaSelection(_)
+                | Self::CheckReplicaStorage(..)
                 | Self::SyncRecords(..)
                 | Self::SyncRecordRequiresPayload(..)
         )
@@ -344,7 +408,39 @@ impl NativeClipboard {
         let mut state = lock_capture_state(&self.capture_state)?;
         let fingerprints = clipboard_fingerprints_reusing(&payload, state.current.as_ref());
         write_payload(&context, payload, local_only)?;
+        state.selection = Some(ClipboardSelection {
+            key: ClipboardSelectionKey(
+                chrono::Utc::now().timestamp_millis().max(
+                    state
+                        .selection
+                        .as_ref()
+                        .map_or(0, |selection| selection.key.0.saturating_add(1)),
+                ),
+                self.local_device_id.clone(),
+                fingerprints.content_hash.clone(),
+                0,
+            ),
+            applied: true,
+        });
         state.remember_write(fingerprints, Instant::now());
+        Ok(())
+    }
+
+    fn write_replica_clipboard(
+        &self,
+        record: &ClipboardSyncRecord,
+        payload: ClipboardPayload,
+    ) -> Result<()> {
+        let context = self
+            .context
+            .lock()
+            .map_err(|_| Error::Clipboard("clipboard context lock poisoned".into()))?;
+        let mut state = lock_capture_state(&self.capture_state)?;
+        let key = ClipboardSelectionKey::from_record(record);
+        let fingerprints = clipboard_fingerprints(&payload);
+        if state.apply_selection(key, || write_payload(&context, payload, true))? {
+            state.remember_write(fingerprints, Instant::now());
+        }
         Ok(())
     }
 

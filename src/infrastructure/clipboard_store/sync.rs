@@ -274,15 +274,13 @@ impl SqliteClipboardStore {
         Ok(records)
     }
 
-    pub(super) async fn apply_label_state<C>(
+    pub(super) async fn apply_label_definitions<C: ConnectionTrait>(
         &self,
         db: &C,
-        record: &ClipboardSyncRecord,
-    ) -> Result<(), DbErr>
-    where
-        C: ConnectionTrait,
-    {
-        for label in &record.labels {
+        labels: &[ClipboardLabel],
+    ) -> Result<usize, DbErr> {
+        let mut changed = 0;
+        for label in labels {
             let current = clipboard_label::Entity::find_by_id(&label.id)
                 .one(db)
                 .await?;
@@ -318,7 +316,20 @@ impl SqliteClipboardStore {
             )
             .exec(db)
             .await?;
+            changed += 1;
         }
+        Ok(changed)
+    }
+
+    pub(super) async fn apply_label_state<C>(
+        &self,
+        db: &C,
+        record: &ClipboardSyncRecord,
+    ) -> Result<(), DbErr>
+    where
+        C: ConnectionTrait,
+    {
+        self.apply_label_definitions(db, &record.labels).await?;
         for membership in &record.label_memberships {
             let current = clipboard_entry_label::Entity::find_by_id((
                 record.sync_id.clone(),
@@ -410,8 +421,16 @@ impl SqliteClipboardStore {
         &self,
         record: ClipboardSyncRecord,
     ) -> Result<bool, DbErr> {
+        self.apply_sync_record_with_timeline(record, None).await
+    }
+
+    pub(super) async fn apply_sync_record_with_timeline(
+        &self,
+        record: ClipboardSyncRecord,
+        timeline: Option<(i64, u32)>,
+    ) -> Result<bool, DbErr> {
         let transaction = self.db.begin().await?;
-        let existing = clipboard_entry::Entity::find()
+        let mut existing = clipboard_entry::Entity::find()
             .filter(clipboard_entry::Column::SyncId.eq(&record.sync_id))
             .one(&transaction)
             .await?;
@@ -423,6 +442,28 @@ impl SqliteClipboardStore {
             );
             incoming > current
         });
+        let selection_changed = if timeline.is_some()
+            && record.live
+            && !record.deleted
+            && record.change_kind == ClipboardSyncChangeKind::Copy
+            && (content_is_newer
+                || existing.as_ref().is_some_and(|existing| {
+                    (
+                        existing.sync_revision.max(0) as u64,
+                        existing.updated_by_device_id.as_str(),
+                    ) == (record.revision, record.updated_by_device_id.as_str())
+                })) {
+            Self::remember_selection(
+                &transaction,
+                &record.sync_id,
+                record.captured_at_ms,
+                &record.updated_by_device_id,
+                record.revision,
+            )
+            .await?
+        } else {
+            false
+        };
         let favorite_is_newer = existing.as_ref().is_none_or(|existing| {
             (
                 record.favorite_revision,
@@ -434,8 +475,33 @@ impl SqliteClipboardStore {
         });
         let labels_are_newer = self.label_state_is_newer(&transaction, &record).await?;
 
+        let mut timeline_changed = false;
+        if let (Some(model), Some((first, count))) = (existing.as_mut(), timeline) {
+            let first = model.first_captured_at_ms.min(first);
+            let count = model.copy_count.max(count.min(i32::MAX as u32) as i32);
+            let captured = model.captured_at_ms.max(record.captured_at_ms);
+            if first != model.first_captured_at_ms
+                || count != model.copy_count
+                || captured != model.captured_at_ms
+            {
+                let mut active = model.clone().into_active_model();
+                active.first_captured_at_ms = Set(first);
+                active.copy_count = Set(count);
+                active.captured_at_ms = Set(captured);
+                active.updated_at_ms = Set(captured.max(model.last_used_at_ms.unwrap_or_default()));
+                *model = active.update(&transaction).await?;
+                timeline_changed = true;
+            }
+        }
+
         if record.deleted {
-            if existing.is_some() && !content_is_newer && !favorite_is_newer && !labels_are_newer {
+            if existing.is_some()
+                && !content_is_newer
+                && !favorite_is_newer
+                && !labels_are_newer
+                && !timeline_changed
+                && !selection_changed
+            {
                 transaction.rollback().await?;
                 return Ok(false);
             }
@@ -469,11 +535,15 @@ impl SqliteClipboardStore {
                     preview: Set(record.preview.clone()),
                     search_text: Set(String::new()),
                     source_app: Set(record.source_app.clone()),
-                    first_captured_at_ms: Set(record.captured_at_ms),
+                    first_captured_at_ms: Set(
+                        timeline.map_or(record.captured_at_ms, |value| value.0)
+                    ),
                     captured_at_ms: Set(record.captured_at_ms),
                     last_used_at_ms: Set(None),
                     updated_at_ms: Set(record.captured_at_ms),
-                    copy_count: Set(1),
+                    copy_count: Set(
+                        timeline.map_or(1, |value| value.1.max(1).min(i32::MAX as u32) as i32)
+                    ),
                     size_bytes: Set(0),
                     character_count: Set(None),
                     storage_bytes: Set(0),
@@ -494,6 +564,9 @@ impl SqliteClipboardStore {
                 .await?;
             }
             self.apply_label_state(&transaction, &record).await?;
+            if timeline.is_some() {
+                self.enforce_replica_policy(&transaction, &record).await?;
+            }
             bump_revision(&transaction).await?;
             transaction.commit().await?;
             return Ok(true);
@@ -501,7 +574,11 @@ impl SqliteClipboardStore {
 
         if record.kind == ClipboardContentKind::Files {
             if let Some(existing) = existing {
-                if !favorite_is_newer && !labels_are_newer {
+                if !favorite_is_newer
+                    && !labels_are_newer
+                    && !timeline_changed
+                    && !selection_changed
+                {
                     transaction.rollback().await?;
                     return Ok(false);
                 }
@@ -529,11 +606,15 @@ impl SqliteClipboardStore {
                     preview: Set(record.preview.clone()),
                     search_text: Set(record.preview.to_lowercase()),
                     source_app: Set(record.source_app.clone()),
-                    first_captured_at_ms: Set(record.captured_at_ms),
+                    first_captured_at_ms: Set(
+                        timeline.map_or(record.captured_at_ms, |value| value.0)
+                    ),
                     captured_at_ms: Set(record.captured_at_ms),
                     last_used_at_ms: Set(None),
                     updated_at_ms: Set(record.captured_at_ms),
-                    copy_count: Set(1),
+                    copy_count: Set(
+                        timeline.map_or(1, |value| value.1.max(1).min(i32::MAX as u32) as i32)
+                    ),
                     size_bytes: Set(0),
                     character_count: Set(None),
                     storage_bytes: Set(0),
@@ -554,13 +635,16 @@ impl SqliteClipboardStore {
                 .await?;
             }
             self.apply_label_state(&transaction, &record).await?;
+            if timeline.is_some() {
+                self.enforce_replica_policy(&transaction, &record).await?;
+            }
             bump_revision(&transaction).await?;
             transaction.commit().await?;
             return Ok(true);
         }
 
         if existing.is_some() && !content_is_newer {
-            if !favorite_is_newer && !labels_are_newer {
+            if !favorite_is_newer && !labels_are_newer && !timeline_changed && !selection_changed {
                 transaction.rollback().await?;
                 return Ok(false);
             }
@@ -576,6 +660,9 @@ impl SqliteClipboardStore {
                 }
             }
             self.apply_label_state(&transaction, &record).await?;
+            if timeline.is_some() {
+                self.enforce_replica_policy(&transaction, &record).await?;
+            }
             bump_revision(&transaction).await?;
             transaction.commit().await?;
             return Ok(true);
@@ -595,9 +682,12 @@ impl SqliteClipboardStore {
 
         let entry_id = if let Some(existing) = existing {
             let id = existing.id;
-            let updated_at_ms = record
-                .captured_at_ms
-                .max(existing.last_used_at_ms.unwrap_or_default());
+            let captured_at_ms = if timeline.is_some() {
+                record.captured_at_ms.max(existing.captured_at_ms)
+            } else {
+                record.captured_at_ms
+            };
+            let updated_at_ms = captured_at_ms.max(existing.last_used_at_ms.unwrap_or_default());
             let mut active = existing.into_active_model();
             active.kind = Set(kind_to_i32(record.kind));
             active.text_syntax = Set(encode_text_syntax(&record.text_syntax)?);
@@ -605,9 +695,14 @@ impl SqliteClipboardStore {
             active.preview = Set(summary.preview);
             active.search_text = Set(search_text);
             active.source_app = Set(summary.source_app);
-            active.captured_at_ms = Set(record.captured_at_ms);
+            active.captured_at_ms = Set(captured_at_ms);
+            active.first_captured_at_ms =
+                Set((*active.first_captured_at_ms.as_ref()).min(captured_at_ms));
             active.updated_at_ms = Set(updated_at_ms);
-            active.copy_count = Set(active.copy_count.as_ref().saturating_add(1));
+            active.copy_count = Set(timeline.map_or_else(
+                || active.copy_count.as_ref().saturating_add(1),
+                |value| (*active.copy_count.as_ref()).max(value.1.min(i32::MAX as u32) as i32),
+            ));
             active.size_bytes = Set(summary.size_bytes.min(i64::MAX as u64) as i64);
             active.character_count = Set(summary
                 .character_count
@@ -646,11 +741,13 @@ impl SqliteClipboardStore {
                 preview: Set(summary.preview),
                 search_text: Set(search_text),
                 source_app: Set(summary.source_app),
-                first_captured_at_ms: Set(record.captured_at_ms),
+                first_captured_at_ms: Set(timeline.map_or(record.captured_at_ms, |value| value.0)),
                 captured_at_ms: Set(record.captured_at_ms),
                 last_used_at_ms: Set(None),
                 updated_at_ms: Set(record.captured_at_ms),
-                copy_count: Set(1),
+                copy_count: Set(
+                    timeline.map_or(1, |value| value.1.max(1).min(i32::MAX as u32) as i32)
+                ),
                 size_bytes: Set(summary.size_bytes.min(i64::MAX as u64) as i64),
                 character_count: Set(summary
                     .character_count
@@ -685,6 +782,9 @@ impl SqliteClipboardStore {
             .exec(&transaction)
             .await?;
         self.apply_label_state(&transaction, &record).await?;
+        if timeline.is_some() {
+            self.enforce_replica_policy(&transaction, &record).await?;
+        }
         bump_revision(&transaction).await?;
         transaction.commit().await?;
         Ok(true)

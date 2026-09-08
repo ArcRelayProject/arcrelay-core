@@ -163,6 +163,26 @@ pub struct ClipboardSyncPage {
     pub next_cursor: Option<u64>,
 }
 
+/// Desktop replication metadata. Manifests never contain payload bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardReplicaRecord {
+    pub record: ClipboardSyncRecord,
+    pub first_captured_at_ms: i64,
+    pub copy_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardReplicaCursor {
+    pub captured_at_ms: i64,
+    pub sync_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardReplicaPage {
+    pub records: Vec<ClipboardReplicaRecord>,
+    pub next_cursor: Option<ClipboardReplicaCursor>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClipboardCursor {
     pub sort_at_ms: i64,
@@ -471,6 +491,60 @@ pub trait ClipboardRepository: Send + Sync {
         update_system_clipboard: bool,
         relay_change: bool,
     ) -> crate::error::Result<bool>;
+
+    async fn replica_page(
+        &self,
+        _cursor: Option<ClipboardReplicaCursor>,
+        _limit: usize,
+    ) -> crate::error::Result<ClipboardReplicaPage> {
+        Err(crate::error::Error::Clipboard(
+            "desktop replication is unavailable".into(),
+        ))
+    }
+
+    async fn replica_record(
+        &self,
+        _sync_id: &str,
+    ) -> crate::error::Result<Option<ClipboardReplicaRecord>> {
+        Err(crate::error::Error::Clipboard(
+            "desktop replication is unavailable".into(),
+        ))
+    }
+
+    /// Reject records outside the local retention window before downloading content.
+    async fn check_replica_storage(
+        &self,
+        _replica: &ClipboardReplicaRecord,
+    ) -> crate::error::Result<()> {
+        Ok(())
+    }
+
+    /// Latest durable live copy, distinct from historical snapshot order.
+    async fn replica_selection(&self) -> crate::error::Result<Option<ClipboardSyncRecord>> {
+        Ok(None)
+    }
+
+    async fn replica_labels(&self) -> crate::error::Result<Vec<ClipboardLabel>> {
+        self.labels().await
+    }
+
+    async fn apply_replica_labels(
+        &self,
+        _labels: Vec<ClipboardLabel>,
+    ) -> crate::error::Result<usize> {
+        Err(crate::error::Error::Clipboard(
+            "desktop replication is unavailable".into(),
+        ))
+    }
+
+    async fn apply_replica_record(
+        &self,
+        replica: ClipboardReplicaRecord,
+        update_system_clipboard: bool,
+    ) -> crate::error::Result<bool> {
+        self.apply_sync_record(replica.record, update_system_clipboard, true)
+            .await
+    }
 
     async fn edit_text(&self, id: u64, content: &str) -> crate::error::Result<()>;
 }
