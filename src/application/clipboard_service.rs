@@ -5,7 +5,7 @@ use crate::domain::clipboard::{
     ClipboardPolicy, ClipboardQuery, ClipboardRepository, ClipboardSummary, ClipboardSyncPage,
     ClipboardSyncPreferences, ClipboardSyncRecord, ClipboardTimelinePage, ClipboardTimelineQuery,
 };
-use crate::domain::input_control::InputControlRepository;
+use crate::domain::input_control::{InputControlRepository, InputPermissionState};
 use crate::error::Result;
 
 /// Application service for clipboard use cases. It coordinates the clipboard
@@ -18,6 +18,12 @@ pub struct ClipboardApplicationService {
 }
 
 impl ClipboardApplicationService {
+    /// Clipboard insertion must not wait behind unrelated network commands
+    /// just to query local Accessibility permission.
+    pub fn input_permission_state(&self) -> InputPermissionState {
+        self.input.permission_state()
+    }
+
     pub async fn shutdown(&self) {
         self.repository.shutdown().await;
     }

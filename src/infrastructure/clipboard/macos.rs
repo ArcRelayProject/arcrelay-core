@@ -1,7 +1,10 @@
 //! Native writes carry an origin marker in the same pasteboard item as the
 //! content. Received sync writes are host-only, so Handoff cannot echo them.
 use super::*;
-use objc2::{rc::autoreleasepool, runtime::ProtocolObject};
+use objc2::{
+    rc::{autoreleasepool, Retained},
+    runtime::ProtocolObject,
+};
 use objc2_app_kit::{
     NSPasteboard, NSPasteboardContentsOptions, NSPasteboardItem, NSPasteboardTypeFileURL,
     NSPasteboardTypeHTML, NSPasteboardTypePNG, NSPasteboardTypeRTF, NSPasteboardTypeString,
@@ -68,6 +71,16 @@ fn write_to(board: &NSPasteboard, payload: ClipboardPayload, local_only: bool) -
             plain_text,
             rtf,
         } => {
+            // HTML-only records (including older synchronized entries) still
+            // need a usable representation for plain-text editors.
+            let plain_text = if plain_text.is_empty() {
+                strip_html(&html)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            } else {
+                plain_text
+            };
             let mut ok = set_string(&item, &plain_text, unsafe { NSPasteboardTypeString });
             if !html.is_empty() {
                 ok &= set_string(&item, &html, unsafe { NSPasteboardTypeHTML });
@@ -113,15 +126,17 @@ fn write_to(board: &NSPasteboard, payload: ClipboardPayload, local_only: bool) -
             return Err(Error::Clipboard("prepare clipboard origin failed".into()));
         }
     }
+    let expected = snapshot_items(&items)?;
     let objects = NSArray::from_retained_slice(
         &items
-            .into_iter()
+            .iter()
+            .cloned()
             .map(ProtocolObject::from_retained)
             .collect::<Vec<_>>(),
     );
     // clearContents after this call would reset CurrentHostOnly. Write objects
     // directly instead of clipboard-rs's setters, which clear a second time.
-    board.prepareForNewContentsWithOptions(if local_only {
+    let generation = board.prepareForNewContentsWithOptions(if local_only {
         NSPasteboardContentsOptions::CurrentHostOnly
     } else {
         NSPasteboardContentsOptions::empty()
@@ -129,12 +144,148 @@ fn write_to(board: &NSPasteboard, payload: ClipboardPayload, local_only: bool) -
     if !board.writeObjects(&objects) {
         return Err(Error::Clipboard("write clipboard objects failed".into()));
     }
-    Ok(())
+    confirm_write(board, generation, &expected)
+}
+
+type ExpectedItem = Vec<(Retained<NSString>, Retained<NSData>)>;
+
+fn snapshot_items(items: &[Retained<NSPasteboardItem>]) -> Result<Vec<ExpectedItem>> {
+    // NSPasteboardItem can become bound to the server after writeObjects. Save
+    // immutable representations now; re-reading the original item afterwards
+    // can return an intervening writer's data and falsely validate it.
+    items
+        .iter()
+        .map(|item| {
+            item.types()
+                .iter()
+                .map(|kind| {
+                    let data = item.dataForType(&kind).ok_or_else(|| {
+                        Error::Clipboard("clipboard representation is not readable".into())
+                    })?;
+                    Ok((kind, data))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+// changeCount advances when ownership is acquired, before the representations
+// are written. A changed count alone is therefore not a readiness signal.
+// Read back every item/type, including all bytes of large images and HTML,
+// before permitting the caller to post Cmd+V. Never retry the write itself.
+fn confirm_write(board: &NSPasteboard, generation: isize, expected: &[ExpectedItem]) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        let complete = write_is_visible(board, generation, expected)?;
+        if complete {
+            tracing::debug!(
+                generation,
+                wait_ms = started.elapsed().as_millis() as u64,
+                "macOS clipboard write verified"
+            );
+            return Ok(());
+        }
+        if started.elapsed() >= Duration::from_secs(2) {
+            return Err(Error::Clipboard(
+                "clipboard content did not become readable; paste cancelled".into(),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn write_is_visible(
+    board: &NSPasteboard,
+    generation: isize,
+    expected: &[ExpectedItem],
+) -> Result<bool> {
+    let unchanged = || {
+        if board.changeCount() == generation {
+            Ok(())
+        } else {
+            Err(Error::Clipboard(
+                "clipboard changed during write; paste cancelled".into(),
+            ))
+        }
+    };
+    unchanged()?;
+    let complete = board.pasteboardItems().is_some_and(|actual| {
+        actual.len() == expected.len()
+            && actual.iter().zip(expected).all(|(actual, expected)| {
+                expected.iter().all(|(kind, expected)| {
+                    actual
+                        .dataForType(kind)
+                        .is_some_and(|actual| actual.isEqualToData(expected))
+                })
+            })
+    });
+    unchanged()?;
+    Ok(complete)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_requires_all_bytes_and_rejects_replaced_clipboard() {
+        autoreleasepool(|_| {
+            let board = NSPasteboard::pasteboardWithUniqueName();
+            let item = NSPasteboardItem::new();
+            let html = format!("<p>{}</p>", "大数据🙂".repeat(300_000));
+            item.setString_forType(&NSString::from_str(&html), unsafe { NSPasteboardTypeHTML });
+            item.setString_forType(&NSString::from_str("fallback"), unsafe {
+                NSPasteboardTypeString
+            });
+            let expected = snapshot_items(&[item.clone()]).unwrap();
+            let generation = board.clearContents();
+            assert!(!write_is_visible(&board, generation, &expected).unwrap());
+            assert!(board.writeObjects(&NSArray::from_retained_slice(&[
+                ProtocolObject::from_retained(item.clone()),
+            ])));
+            confirm_write(&board, generation, &expected).unwrap();
+            // A readable, same-generation but truncated representation is not ready.
+            board.setString_forType(&NSString::from_str("<p>partial</p>"), unsafe {
+                NSPasteboardTypeHTML
+            });
+            assert!(!write_is_visible(&board, generation, &expected).unwrap());
+            board.clearContents();
+            assert!(write_is_visible(&board, generation, &expected).is_err());
+            board.clearContents();
+        });
+    }
+
+    #[test]
+    fn html_without_plain_text_remains_pasteable_in_text_editors() {
+        autoreleasepool(|_| {
+            let board = NSPasteboard::pasteboardWithUniqueName();
+            write_to(
+                &board,
+                ClipboardPayload::RichText {
+                    html: "<p>Hello <b>世界</b></p>".into(),
+                    plain_text: String::new(),
+                    rtf: None,
+                },
+                false,
+            )
+            .unwrap();
+            assert_eq!(
+                board
+                    .stringForType(unsafe { NSPasteboardTypeString })
+                    .unwrap()
+                    .to_string(),
+                "Hello 世界"
+            );
+            assert_eq!(
+                board
+                    .dataForType(unsafe { NSPasteboardTypeHTML })
+                    .unwrap()
+                    .to_vec(),
+                "<p>Hello <b>世界</b></p>".as_bytes()
+            );
+            board.clearContents();
+        });
+    }
 
     #[test]
     fn native_writes_keep_representations_and_origin_without_a_runtime() {
