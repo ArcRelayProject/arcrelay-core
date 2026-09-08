@@ -182,6 +182,7 @@ impl DbClient {
 }
 
 pub struct NativeClipboard {
+    resources: Arc<arcrelay_content::ContentResources>,
     workers: ClipboardWorkers,
     context: Mutex<ClipboardContext>,
     db: DbClient,
@@ -235,7 +236,7 @@ impl NativeClipboard {
             &workers,
         )?;
         start_ocr_worker(
-            Arc::new(ClipboardOcr::with_resources(resources)),
+            Arc::new(ClipboardOcr::with_resources(resources.clone())),
             ocr_job_rx,
             db.clone(),
             ocr_event_tx.clone(),
@@ -243,37 +244,42 @@ impl NativeClipboard {
         )?;
         let capture_state = Arc::new(Mutex::new(ClipboardCaptureState::default()));
 
-        if let Ok(Some(payload)) = capture_payload(&context) {
-            capture_state
-                .lock()
-                .map_err(|_| Error::Clipboard("clipboard capture lock poisoned".into()))?
-                .current = Some(clipboard_fingerprints(&payload));
-            let source_app = detect_source_application(&context, source_provider.as_ref());
-            let content_hash = content_hash(&payload);
-            let summary = summarize(&payload, source_app);
-            db.blocking_send(DbCommand::Store {
-                payload,
-                content_hash,
-                summary,
-                touch_existing: false,
-                source_device_id: local_device_id.clone(),
-                source_device_name: local_device_name.clone(),
-                live: false,
-                capture_origin: None,
-                response: None,
-            })?;
+        {
+            let _work = capture_work(&context, &resources)?;
+            if let Ok(Some(payload)) = capture_payload(&context) {
+                let fingerprints = clipboard_fingerprints(&payload);
+                let content_hash = fingerprints.content_hash.clone();
+                capture_state
+                    .lock()
+                    .map_err(|_| Error::Clipboard("clipboard capture lock poisoned".into()))?
+                    .current = Some(fingerprints);
+                let source_app = detect_source_application(&context, source_provider.as_ref());
+                let summary = summarize(&payload, source_app);
+                db.blocking_send(DbCommand::Store {
+                    payload,
+                    content_hash,
+                    summary,
+                    touch_existing: false,
+                    source_device_id: local_device_id.clone(),
+                    source_device_name: local_device_name.clone(),
+                    live: false,
+                    capture_origin: None,
+                    response: None,
+                })?;
+            }
         }
         let notifications_available = start_watcher(
             db.clone(),
             Arc::clone(&capture_state),
             source_provider.clone(),
-            local_device_id.clone(),
-            local_device_name.clone(),
+            (local_device_id.clone(), local_device_name.clone()),
             sync_tx.clone(),
+            resources.clone(),
             &workers,
         );
 
         Ok(Self {
+            resources,
             workers,
             context: Mutex::new(context),
             db,
@@ -320,6 +326,15 @@ impl NativeClipboard {
     }
 
     fn write_system_clipboard(&self, payload: ClipboardPayload, local_only: bool) -> Result<()> {
+        let _work = if matches!(payload, ClipboardPayload::Image { .. }) {
+            Some(
+                self.resources
+                    .blocking_work(256 * 1024 * 1024)
+                    .map_err(|error| Error::Clipboard(error.to_string()))?,
+            )
+        } else {
+            None
+        };
         let context = self
             .context
             .lock()
@@ -327,7 +342,7 @@ impl NativeClipboard {
         // Serialize writes with capture reads, including their successful DB commit.
         // The DB worker never takes this lock.
         let mut state = lock_capture_state(&self.capture_state)?;
-        let fingerprints = clipboard_fingerprints(&payload);
+        let fingerprints = clipboard_fingerprints_reusing(&payload, state.current.as_ref());
         write_payload(&context, payload, local_only)?;
         state.remember_write(fingerprints, Instant::now());
         Ok(())
@@ -390,6 +405,7 @@ impl ClipboardHandler for HostClipboardHandler {
 }
 
 struct ClipboardCaptureWorker {
+    resources: Arc<arcrelay_content::ContentResources>,
     context: ClipboardContext,
     changed: mpsc::Receiver<()>,
     db: DbClient,

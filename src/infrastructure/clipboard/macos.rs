@@ -80,8 +80,7 @@ fn write_to(board: &NSPasteboard, payload: ClipboardPayload, local_only: bool) -
             ok
         }
         ClipboardPayload::Image { png, .. } => {
-            image::load_from_memory_with_format(&png, image::ImageFormat::Png)
-                .map_err(|error| Error::Clipboard(format!("decode stored image: {error}")))?;
+            decode_image_png(&png)?;
             item.setData_forType(&NSData::with_bytes(&png), unsafe { NSPasteboardTypePNG })
         }
         ClipboardPayload::Files(paths) => {

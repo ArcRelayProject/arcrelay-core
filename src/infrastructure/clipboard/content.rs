@@ -121,6 +121,7 @@ pub(super) fn capture_payload(context: &ClipboardContext) -> Result<Option<Clipb
     if context.has(ContentFormat::Image) {
         if let Ok(image) = context.get_image() {
             let (width, height) = image.get_size();
+            validate_capture_dimensions(width, height)?;
             let png = image
                 .to_png()
                 .map_err(|error| Error::Clipboard(format!("encode clipboard image: {error}")))?
@@ -165,6 +166,47 @@ pub(super) fn capture_payload(context: &ClipboardContext) -> Result<Option<Clipb
     }
 }
 
+fn validate_capture_dimensions(width: u32, height: u32) -> Result<()> {
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 16 * 1024 * 1024 {
+        return Err(Error::Clipboard(
+            "clipboard image exceeds decoded image budget".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn decode_image_png(png: &[u8]) -> Result<image::DynamicImage> {
+    let dimensions =
+        image::ImageReader::with_format(std::io::Cursor::new(png), image::ImageFormat::Png)
+            .into_dimensions()
+            .map_err(|error| Error::Clipboard(error.to_string()))?;
+    validate_capture_dimensions(dimensions.0, dimensions.1)?;
+    let mut reader =
+        image::ImageReader::with_format(std::io::Cursor::new(png), image::ImageFormat::Png);
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    reader
+        .decode()
+        .map_err(|error| Error::Clipboard(error.to_string()))
+}
+
+pub(super) fn capture_work(
+    context: &ClipboardContext,
+    resources: &arcrelay_content::ContentResources,
+) -> Result<Option<arcrelay_content::ContentWorkPermit>> {
+    // Native image conversion, encoding and semantic hashing share admission
+    // with OCR and previews. Text-only capture must not wait for an OCR job.
+    if context.has(ContentFormat::Image) || context.has(ContentFormat::Files) {
+        resources
+            .blocking_work(256 * 1024 * 1024)
+            .map(Some)
+            .map_err(|error| Error::Clipboard(error.to_string()))
+    } else {
+        Ok(None)
+    }
+}
+
 pub(super) fn plain_text_html(text: &str) -> String {
     let escaped = text
         .replace('&', "&amp;")
@@ -190,9 +232,24 @@ pub(super) fn image_payload_from_file(path: &str) -> Result<Option<ClipboardPayl
         Ok(_) | Err(_) => return Ok(None),
     };
     let _ = metadata;
-    let image = match clipboard_rs::RustImageData::from_path(path) {
+    let decode = || -> Result<clipboard_rs::RustImageData> {
+        let (width, height) =
+            image::image_dimensions(path).map_err(|error| Error::Clipboard(error.to_string()))?;
+        validate_capture_dimensions(width, height)?;
+        let mut reader =
+            image::ImageReader::open(path).map_err(|error| Error::Clipboard(error.to_string()))?;
+        let mut limits = image::Limits::default();
+        limits.max_alloc = Some(128 * 1024 * 1024);
+        reader.limits(limits);
+        reader
+            .decode()
+            .map(clipboard_rs::RustImageData::from_dynamic_image)
+            .map_err(|error| Error::Clipboard(error.to_string()))
+    };
+    let image = match decode() {
         Ok(image) => image,
         Err(error) => {
+            // Keep unsupported or oversized images as copied files.
             warn!(%error, "failed to decode copied image file");
             return Ok(None);
         }
@@ -582,7 +639,17 @@ pub(super) fn content_hash(payload: &ClipboardPayload) -> String {
 }
 
 pub(super) fn clipboard_fingerprints(payload: &ClipboardPayload) -> ClipboardFingerprints {
+    clipboard_fingerprints_reusing(payload, None)
+}
+
+pub(super) fn clipboard_fingerprints_reusing(
+    payload: &ClipboardPayload,
+    previous: Option<&ClipboardFingerprints>,
+) -> ClipboardFingerprints {
     let content_hash = content_hash(payload);
+    if let Some(previous) = previous.filter(|previous| previous.content_hash == content_hash) {
+        return previous.clone();
+    }
     let semantic_hash = match payload {
         ClipboardPayload::Text(_) | ClipboardPayload::RichText { .. } => semantic_hash(payload),
         ClipboardPayload::Image { .. } => semantic_hash(payload),
@@ -619,7 +686,7 @@ pub(super) fn semantic_hash(payload: &ClipboardPayload) -> String {
             digest.update(b"image\0");
             // PNG metadata/compression can change during native pasteboard conversion.
             // Compare decoded pixels, but retain a byte fallback for invalid input.
-            if let Ok(image) = image::load_from_memory_with_format(png, image::ImageFormat::Png) {
+            if let Ok(image) = decode_image_png(png) {
                 let rgba = image.into_rgba8();
                 digest.update(&rgba.width().to_le_bytes());
                 digest.update(&rgba.height().to_le_bytes());

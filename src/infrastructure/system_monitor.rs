@@ -1,8 +1,6 @@
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use sysinfo::{
-    Components, CpuRefreshKind, Disks, MemoryRefreshKind, Networks, RefreshKind, System,
-};
+use sysinfo::{Components, Disks, Networks, System};
 
 use crate::domain::system_monitor::*;
 use crate::error::Result;
@@ -34,21 +32,17 @@ const SLOW_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 
 impl SysInfoMonitor {
     pub fn new() -> Self {
-        let sys = System::new_with_specifics(
-            RefreshKind::nothing()
-                .with_cpu(CpuRefreshKind::everything())
-                .with_memory(MemoryRefreshKind::everything()),
-        );
+        let sys = System::new();
         Self {
             state: Arc::new(Mutex::new(MonitorState {
                 sys,
-                networks: Networks::new_with_refreshed_list(),
+                networks: Networks::new(),
                 // Refresh lazily from `collect_snapshot_sync`, which runs on a
                 // blocking worker. On Windows the initial component refresh
                 // initializes COM as MTA, so doing it here would change the UI
                 // thread's apartment before Tauri creates its WebView window.
                 components: Components::new(),
-                disks: Disks::new_with_refreshed_list(),
+                disks: Disks::new(),
                 last_network_refresh: Instant::now(),
                 slow_sample: None,
                 last_slow_refresh: None,
@@ -311,5 +305,21 @@ impl SystemMonitorRepository for SysInfoMonitor {
 
     async fn network_stats(&self) -> Result<NetworkStats> {
         Ok(self.collect_snapshot().await?.network)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_system_monitor_does_not_scan_or_require_runtime() {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let monitor = SysInfoMonitor::new();
+        let state = monitor.state.lock().unwrap();
+        assert!(state.sys.cpus().is_empty());
+        assert!(state.disks.list().is_empty());
+        assert!(state.networks.list().is_empty());
+        assert!(monitor.gpu_names.get().is_none());
     }
 }

@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn unchanged_image_reuses_fingerprint_but_changed_content_does_not() {
+    let payload = ClipboardPayload::Image {
+        png: vec![1, 2, 3],
+        width: 1,
+        height: 1,
+    };
+    let previous = ClipboardFingerprints {
+        content_hash: content_hash(&payload),
+        semantic_hash: "previous decoded pixels".into(),
+    };
+    assert_eq!(
+        clipboard_fingerprints_reusing(&payload, Some(&previous)).semantic_hash,
+        previous.semantic_hash
+    );
+    let changed = ClipboardPayload::Image {
+        png: vec![4, 5, 6],
+        width: 1,
+        height: 1,
+    };
+    assert_ne!(
+        clipboard_fingerprints_reusing(&changed, Some(&previous)).semantic_hash,
+        previous.semantic_hash
+    );
+}
+
+#[test]
 fn clipboard_callback_coalesces_without_waiting_for_worker_capacity() {
     let (changed, receiver) = mpsc::sync_channel(1);
     let mut handler = HostClipboardHandler { changed };
@@ -174,6 +200,16 @@ fn copied_image_files_are_recognized_case_insensitively() {
             ..
         })
     ));
+}
+
+#[test]
+fn invalid_image_file_remains_a_file_instead_of_aborting_capture() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("not-an-image.png");
+    std::fs::write(&path, b"invalid png").unwrap();
+    assert!(image_payload_from_file(path.to_str().unwrap())
+        .unwrap()
+        .is_none());
 }
 
 #[test]

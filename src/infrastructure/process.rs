@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use sysinfo::{ProcessRefreshKind, RefreshKind, System};
+use sysinfo::{ProcessRefreshKind, System};
 
 use crate::domain::process::*;
 use crate::error::{Error, Result};
@@ -21,9 +21,8 @@ pub struct SysInfoProcessRepo {
 impl SysInfoProcessRepo {
     pub fn new() -> Self {
         Self {
-            sys: Arc::new(Mutex::new(System::new_with_specifics(
-                RefreshKind::nothing().with_processes(ProcessRefreshKind::everything()),
-            ))),
+            // Keep construction cheap: remote process monitoring may never be used.
+            sys: Arc::new(Mutex::new(System::new())),
             refresh_gate: tokio::sync::Mutex::new(()),
             cache: Arc::new(Mutex::new(None)),
         }
@@ -114,16 +113,48 @@ impl ProcessRepository for SysInfoProcessRepo {
     }
 
     async fn kill(&self, pid: u32) -> Result<()> {
-        let sys = self.sys.lock().unwrap_or_else(|error| error.into_inner());
-        let sysinfo_pid = sysinfo::Pid::from_u32(pid);
-        if let Some(process) = sys.process(sysinfo_pid) {
-            if process.kill() {
-                Ok(())
+        let sys = Arc::clone(&self.sys);
+        tokio::task::spawn_blocking(move || {
+            let mut sys = sys.lock().unwrap_or_else(|error| error.into_inner());
+            let sysinfo_pid = sysinfo::Pid::from_u32(pid);
+            sys.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[sysinfo_pid]),
+                true,
+                ProcessRefreshKind::nothing(),
+            );
+            if let Some(process) = sys.process(sysinfo_pid) {
+                if process.kill() {
+                    Ok(())
+                } else {
+                    Err(Error::Other(format!("failed to kill process {pid}")))
+                }
             } else {
-                Err(Error::Other(format!("failed to kill process {pid}")))
+                Err(Error::NotFound(format!("process {pid}")))
             }
-        } else {
-            Err(Error::NotFound(format!("process {pid}")))
-        }
+        })
+        .await
+        .map_err(|error| Error::Other(format!("process termination task failed: {error}")))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_process_monitor_does_not_scan_or_require_runtime() {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let repository = SysInfoProcessRepo::new();
+        assert!(repository.sys.lock().unwrap().processes().is_empty());
+        assert!(repository.cache.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn process_monitor_first_request_loads_current_process() {
+        let repository = SysInfoProcessRepo::new();
+        let processes = repository.list(ProcessSortBy::Name).await.unwrap();
+        assert!(processes
+            .iter()
+            .any(|p| p.pid == std::process::id() && !p.name.is_empty()));
     }
 }

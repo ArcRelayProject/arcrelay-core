@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) fn run_clipboard_capture_worker(worker: ClipboardCaptureWorker) {
     let ClipboardCaptureWorker {
+        resources,
         context,
         changed,
         db,
@@ -15,6 +16,7 @@ pub(super) fn run_clipboard_capture_worker(worker: ClipboardCaptureWorker) {
         std::thread::sleep(Duration::from_millis(20));
         while changed.try_recv().is_ok() {}
         let result = (|| -> Result<()> {
+            let _work = capture_work(&context, &resources)?;
             let mut state = lock_capture_state(&capture_state)?;
             #[cfg(target_os = "macos")]
             let stamp = macos::stamp();
@@ -38,7 +40,7 @@ pub(super) fn run_clipboard_capture_worker(worker: ClipboardCaptureWorker) {
             let origin = stamp.origin;
             #[cfg(not(target_os = "macos"))]
             let origin = NativeClipboardOrigin::Local;
-            let fingerprints = clipboard_fingerprints(&payload);
+            let fingerprints = clipboard_fingerprints_reusing(&payload, state.current.as_ref());
             if !state.accepts(
                 &fingerprints,
                 origin,
@@ -559,11 +561,12 @@ pub(super) fn start_watcher(
     db: DbClient,
     capture_state: SharedCaptureState,
     source_provider: Arc<dyn WindowManagerRepository>,
-    source_device_id: String,
-    source_device_name: String,
+    source_device: (String, String),
     sync_tx: tokio::sync::broadcast::Sender<ClipboardSyncRecord>,
+    resources: Arc<arcrelay_content::ContentResources>,
     workers: &ClipboardWorkers,
 ) -> bool {
+    let (source_device_id, source_device_name) = source_device;
     let (changed_tx, changed_rx) = mpsc::sync_channel(1);
     let (capture_ready_tx, capture_ready_rx) = mpsc::sync_channel(1);
     let capture_worker = std::thread::Builder::new()
@@ -579,6 +582,7 @@ pub(super) fn start_watcher(
             };
             let _ = capture_ready_tx.send(true);
             run_clipboard_capture_worker(ClipboardCaptureWorker {
+                resources,
                 context,
                 changed: changed_rx,
                 db,
