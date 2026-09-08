@@ -22,12 +22,13 @@ pub(super) fn run_clipboard_capture_worker(worker: ClipboardCaptureWorker) {
             if stamp.origin == NativeClipboardOrigin::ArcRelay {
                 return Ok(());
             }
+            #[cfg(not(target_os = "macos"))]
+            let origin = external_clipboard_origin(&context);
             let Some(payload) = capture_payload(&context)? else {
                 // Empty/temporarily unavailable Handoff representations do not
                 // erase the last committed content and reopen the echo path.
                 return Ok(());
             };
-            let source_app = detect_source_application(&context, source_provider.as_ref());
             #[cfg(target_os = "macos")]
             if stamp != macos::stamp() {
                 // A writer or lazy Handoff materialization changed the board
@@ -37,7 +38,10 @@ pub(super) fn run_clipboard_capture_worker(worker: ClipboardCaptureWorker) {
             #[cfg(target_os = "macos")]
             let origin = stamp.origin;
             #[cfg(not(target_os = "macos"))]
-            let origin = NativeClipboardOrigin::Local;
+            if origin != external_clipboard_origin(&context) {
+                return Ok(());
+            }
+            let source_app = source_application_for_origin(origin, source_provider.as_ref());
             let fingerprints = clipboard_fingerprints(&payload);
             if !state.accepts(
                 &fingerprints,
@@ -58,7 +62,9 @@ pub(super) fn run_clipboard_capture_worker(worker: ClipboardCaptureWorker) {
                 source_device_name: source_device_name.clone(),
                 live: true,
                 capture_origin: Some(match origin {
-                    NativeClipboardOrigin::Handoff => ClipboardCaptureOrigin::Remote,
+                    NativeClipboardOrigin::Handoff | NativeClipboardOrigin::RustDesk => {
+                        ClipboardCaptureOrigin::Remote
+                    }
                     _ => ClipboardCaptureOrigin::Local,
                 }),
                 response: Some(response_tx),
