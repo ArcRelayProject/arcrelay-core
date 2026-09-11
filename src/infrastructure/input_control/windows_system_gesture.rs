@@ -1,4 +1,4 @@
-//! Portable v1 swipe semantics translated to Windows Precision Touchpad input.
+//! Portable system gestures translated to Windows Precision Touchpad input.
 //! The optional Windows 11 entry point is resolved at runtime. Failure disables
 //! this instance; callers retain the idempotent SwitchSpace command fallback.
 use arcrelay_input::SystemGestureEvent;
@@ -9,14 +9,50 @@ fn contacts(event: SystemGestureEvent) -> Vec<(i32, i32)> {
     } else {
         event.progress.clamp(-1.2, 1.2)
     };
-    if event.axis == 1 {
-        // Positive v1 progress requests the desktop to the right (fingers left).
-        let x = (5_000.0 - progress * 3_200.0).round() as i32;
-        [1_800, 2_600, 3_400, 4_200].map(|y| (x, y)).to_vec()
-    } else {
-        // Windows uses three fingers for Task View / show desktop.
-        let y = (3_000.0 + progress * 1_800.0).round() as i32;
-        [3_000, 5_000, 7_000].map(|x| (x, y)).to_vec()
+    match event.axis {
+        1 => {
+            // Positive v1 progress requests the desktop to the right (fingers left).
+            let x = (5_000.0 - progress * 3_200.0).round() as i32;
+            let count = if matches!(event.finger_count, 3 | 4) {
+                event.finger_count
+            } else {
+                4
+            };
+            [1_800, 2_600, 3_400, 4_200]
+                .into_iter()
+                .take(count as usize)
+                .map(|y| (x, y))
+                .collect()
+        }
+        2 => {
+            // macOS DockSwipe progress uses the legacy injection sign. Reverse
+            // it for physical Windows contact motion: source up must remain up.
+            let y = (3_000.0 - progress * 1_800.0).round() as i32;
+            let count = if matches!(event.finger_count, 3 | 4) {
+                event.finger_count
+            } else {
+                3
+            };
+            [2_000, 4_000, 6_000, 8_000]
+                .into_iter()
+                .take(count as usize)
+                .map(|x| (x, y))
+                .collect()
+        }
+        3 => {
+            // Positive magnification is a spread. Keep the centroid fixed so
+            // Windows recognizes zoom rather than a two-finger pan.
+            let direction = if event.inverted_from_device {
+                -1.0
+            } else {
+                1.0
+            };
+            let half_span = (900.0 + direction * progress * 2_400.0).clamp(300.0, 2_500.0);
+            let left = (5_000.0 - half_span).round() as i32;
+            let right = (5_000.0 + half_span).round() as i32;
+            vec![(left, 3_000), (right, 3_000)]
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -34,7 +70,6 @@ mod native {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::Graphics::Gdi::HMONITOR;
     use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
-    use windows::Win32::System::Registry::RRF_RT_REG_DWORD;
     use windows::Win32::UI::Controls::{
         DestroySyntheticPointerDevice, HSYNTHETICPOINTERDEVICE, POINTER_FEEDBACK_MODE,
         POINTER_FEEDBACK_NONE, POINTER_TYPE_INFO, POINTER_TYPE_INFO_0,
@@ -67,24 +102,6 @@ mod native {
                 Create,
             >(symbol))
         })
-    }
-
-    fn configured_for_desktop_gestures() -> bool {
-        use crate::infrastructure::window_manager::windows_desktops::registry_value;
-        let setting = |name, default| {
-            registry_value(
-                r"Software\Microsoft\Windows\CurrentVersion\PrecisionTouchPad",
-                name,
-                RRF_RT_REG_DWORD,
-            )
-            .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
-            .map(u32::from_le_bytes)
-            .unwrap_or(default)
-        };
-        // Respect user remapping (including disabled/audio/custom gestures).
-        // Never rewrite settings to make the injected gesture work.
-        setting("FourFingerSlideEnabled", 2) == 2
-            && matches!(setting("ThreeFingerSlideEnabled", 1), 1 | 2)
     }
 
     struct Device {
@@ -165,9 +182,6 @@ mod native {
     }
     impl State {
         fn prepare(&mut self) -> bool {
-            if !configured_for_desktop_gestures() {
-                return false;
-            }
             if !self.attempted {
                 self.attempted = true;
                 self.device = Device::create();
@@ -205,13 +219,9 @@ mod native {
         }
         pub fn apply(&self, event: SystemGestureEvent) -> Result<()> {
             event
-                .validate_format(1)
+                .validate_format(arcrelay_input::MAX_SYSTEM_GESTURE_FORMAT_VERSION)
                 .map_err(|error| Error::InputControl(error.into()))?;
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if event.phase == 1 && !configured_for_desktop_gestures() {
-                state.cancel();
-                return Ok(());
-            }
             let phases = state
                 .sequence
                 .apply(event)
@@ -280,6 +290,7 @@ mod native {
                 velocity_x: 0.0,
                 velocity_y: 0.0,
                 inverted_from_device: false,
+                finger_count: 0,
             };
             assert!(gesture.apply(event).is_err());
             assert!(!gesture.state.lock().unwrap().attempted);
@@ -298,10 +309,11 @@ mod tests {
             velocity_x: 0.0,
             velocity_y: 0.0,
             inverted_from_device: false,
+            finger_count: 0,
         }
     }
     #[test]
-    fn windows_desktop_swipe_uses_four_contacts_and_reverses_without_a_jump() {
+    fn windows_horizontal_swipe_preserves_three_or_four_contacts_without_a_jump() {
         let start = contacts(event(1, 0.0));
         let right = contacts(event(1, 0.5));
         let left = contacts(event(1, -0.5));
@@ -318,6 +330,46 @@ mod tests {
             }),
             start
         );
+        let three = contacts(SystemGestureEvent {
+            finger_count: 3,
+            ..event(1, 0.5)
+        });
+        assert_eq!(three.len(), 3);
+        assert!(three.iter().all(|point| point.0 == right[0].0));
+    }
+
+    #[test]
+    fn windows_vertical_swipe_keeps_physical_direction_and_contact_count() {
+        let start = contacts(event(2, 0.0));
+        let up = contacts(event(2, 0.5));
+        let down = contacts(event(2, -0.5));
+        assert_eq!(start.len(), 3);
+        for index in 0..3 {
+            assert!(up[index].1 < start[index].1);
+            assert!(down[index].1 > start[index].1);
+        }
+        assert_eq!(
+            contacts(SystemGestureEvent {
+                finger_count: 4,
+                ..event(2, 0.5)
+            })
+            .len(),
+            4
+        );
+    }
+
+    #[test]
+    fn windows_pinch_uses_two_contacts_about_a_fixed_centroid() {
+        let start = contacts(event(3, 0.0));
+        let spread = contacts(event(3, 0.5));
+        let pinch = contacts(event(3, -0.5));
+        assert_eq!(start.len(), 2);
+        assert!(spread[0].0 < start[0].0 && spread[1].0 > start[1].0);
+        assert!(pinch[0].0 > start[0].0 && pinch[1].0 < start[1].0);
+        for points in [start, spread, pinch] {
+            assert_eq!(points[0].0 + points[1].0, 10_000);
+            assert_eq!(points[0].1, points[1].1);
+        }
     }
     #[test]
     fn windows_gesture_extremes_stay_inside_physical_touchpad() {
@@ -329,6 +381,11 @@ mod tests {
                     .iter()
                     .all(|(x, y)| (1..10_000).contains(x) && (1..6_000).contains(y)));
             }
+        }
+        for progress in [-4.0, -1.2, 0.0, 1.2, 4.0] {
+            assert!(contacts(event(3, progress))
+                .iter()
+                .all(|(x, y)| (1..10_000).contains(x) && (1..6_000).contains(y)));
         }
     }
 }

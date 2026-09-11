@@ -59,8 +59,8 @@ pub enum InputEvent {
 pub trait InputControlRepository: Send + Sync {
     fn permission_state(&self) -> InputPermissionState;
 
-    /// Advertised only when this receiver can inject bounded v1 horizontal and
-    /// vertical swipes (DockSwipe on macOS, Precision Touchpad on Windows).
+    /// Advertised only when this receiver can inject bounded negotiated system
+    /// gestures (DockSwipe on macOS, Precision Touchpad on Windows).
     fn supports_system_gestures(&self) -> bool {
         false
     }
