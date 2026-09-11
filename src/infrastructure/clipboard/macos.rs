@@ -139,7 +139,7 @@ fn write_to(board: &NSPasteboard, payload: ClipboardPayload, local_only: bool) -
     );
     // clearContents after this call would reset CurrentHostOnly. Write objects
     // directly instead of clipboard-rs's setters, which clear a second time.
-    let generation = board.prepareForNewContentsWithOptions(if local_only {
+    board.prepareForNewContentsWithOptions(if local_only {
         NSPasteboardContentsOptions::CurrentHostOnly
     } else {
         NSPasteboardContentsOptions::empty()
@@ -147,6 +147,11 @@ fn write_to(board: &NSPasteboard, payload: ClipboardPayload, local_only: bool) -
     if !board.writeObjects(&objects) {
         return Err(Error::Clipboard("write clipboard objects failed".into()));
     }
+    // AppKit can advance the change count once more while committing objects,
+    // especially when replacing file URLs with host-only image data. Snapshot
+    // the final generation after the successful write; the byte-for-byte item
+    // check below still rejects an intervening external writer.
+    let generation = board.changeCount();
     confirm_write(board, generation, &expected)
 }
 
