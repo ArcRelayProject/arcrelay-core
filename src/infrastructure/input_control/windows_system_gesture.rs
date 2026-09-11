@@ -284,7 +284,7 @@ mod native {
         fn invalid_windows_gesture_does_not_initialize_or_mutate_native_state() {
             let gesture = WindowsSystemGesture::default();
             let event = SystemGestureEvent {
-                axis: 3,
+                axis: 0,
                 phase: 1,
                 progress: 0.0,
                 velocity_x: 0.0,
