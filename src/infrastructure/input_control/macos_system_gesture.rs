@@ -117,6 +117,7 @@ mod tests {
             velocity_x: -4.5,
             velocity_y: -4.5,
             inverted_from_device: false,
+            finger_count: 0,
         };
         let (dock, companion) = make_phase(sample).unwrap();
         unsafe {
@@ -145,6 +146,7 @@ mod tests {
                         velocity_x: sign * 4.5,
                         velocity_y: sign * 4.5,
                         inverted_from_device,
+                        finger_count: 0,
                     };
                     let (dock, companion) = make_phase(sample).unwrap();
                     unsafe {
