@@ -464,7 +464,12 @@ pub(super) fn sanitize_html_preview(html: &str) -> Option<String> {
         .chars()
         .take(MAX_SAFE_HTML_INPUT_CHARS)
         .collect::<String>();
+    clean_html_fragment(&fragment)
+}
+
+pub(super) fn clean_html_fragment(fragment: &str) -> Option<String> {
     let tags = [
+        "hr",
         "p",
         "br",
         "div",
@@ -513,7 +518,7 @@ pub(super) fn sanitize_html_preview(html: &str) -> Option<String> {
         .generic_attributes(attributes)
         .tag_attributes(std::collections::HashMap::new())
         .strip_comments(true);
-    let sanitized = builder.clean(&fragment).to_string();
+    let sanitized = builder.clean(fragment).to_string();
     (!sanitized.trim().is_empty()).then_some(sanitized)
 }
 
@@ -668,6 +673,25 @@ pub(super) fn semantic_hash(payload: &ClipboardPayload) -> String {
 pub(super) fn update_normalized_text(digest: &mut Xxh3, text: &str) {
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     digest.update(normalized.as_bytes());
+}
+
+pub(super) fn validate_file_paths(paths: Vec<String>) -> Result<Vec<String>> {
+    if paths.is_empty() {
+        return Err(Error::Clipboard("no received files".into()));
+    }
+    let mut unique = Vec::new();
+    for path in paths {
+        let file = std::path::Path::new(&path);
+        if !file.is_absolute() || !file.exists() {
+            return Err(Error::Clipboard(
+                "received file is missing or has no absolute local path".into(),
+            ));
+        }
+        if !unique.contains(&path) {
+            unique.push(path);
+        }
+    }
+    Ok(unique)
 }
 
 #[cfg(test)]

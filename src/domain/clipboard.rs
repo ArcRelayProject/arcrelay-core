@@ -422,8 +422,30 @@ pub trait ClipboardRepository: Send + Sync {
     /// never be used as a content source.
     async fn text_content(&self, id: u64) -> crate::error::Result<String>;
 
+    /// Complete source is local-host-only and must be displayed as escaped text.
+    async fn text_preview(
+        &self,
+        id: u64,
+        format: Option<ClipboardTextFormat>,
+    ) -> crate::error::Result<ClipboardTextPreview> {
+        let source = self.text_content(id).await?;
+        Ok(ClipboardTextPreview {
+            source,
+            format: format.unwrap_or(ClipboardTextFormat::Text),
+            safe_html: None,
+            render_limited: false,
+        })
+    }
+
+    /// Write finalized local files and retain one history record, without replication.
+    async fn set_files(&self, _paths: Vec<String>) -> crate::error::Result<()> {
+        Err(crate::error::Error::NotSupported(
+            "writing clipboard files".into(),
+        ))
+    }
+
     /// Returns a bounded, strictly sanitized HTML fragment for local preview.
-    /// Original HTML never crosses into the WebView.
+    /// Rendering only uses this sanitized fragment; source views must escape original HTML.
     async fn safe_html_preview(&self, id: u64) -> crate::error::Result<Option<String>>;
 
     async fn policy(&self) -> crate::error::Result<ClipboardPolicy>;
@@ -549,4 +571,21 @@ pub trait ClipboardRepository: Send + Sync {
     }
 
     async fn edit_text(&self, id: u64, content: &str) -> crate::error::Result<()>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub enum ClipboardTextFormat {
+    Text,
+    Html,
+    Markdown,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardTextPreview {
+    pub source: String,
+    pub format: ClipboardTextFormat,
+    pub safe_html: Option<String>,
+    pub render_limited: bool,
 }

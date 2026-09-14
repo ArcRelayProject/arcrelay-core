@@ -529,6 +529,7 @@ mod content;
 #[cfg(target_os = "macos")]
 mod macos;
 mod repository;
+mod text_preview;
 mod worker;
 
 use content::*;

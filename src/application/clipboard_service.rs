@@ -144,6 +144,18 @@ impl ClipboardApplicationService {
         self.repository.text_content(id).await
     }
 
+    pub async fn text_preview(
+        &self,
+        id: u64,
+        format: Option<crate::domain::clipboard::ClipboardTextFormat>,
+    ) -> Result<crate::domain::clipboard::ClipboardTextPreview> {
+        self.repository.text_preview(id, format).await
+    }
+
+    pub async fn set_files(&self, paths: Vec<String>) -> Result<()> {
+        self.repository.set_files(paths).await
+    }
+
     pub async fn safe_html_preview(&self, id: u64) -> Result<Option<String>> {
         self.repository.safe_html_preview(id).await
     }

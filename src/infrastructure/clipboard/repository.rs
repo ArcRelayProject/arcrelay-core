@@ -94,6 +94,45 @@ impl ClipboardRepository for NativeClipboard {
         Ok(sanitize_html_preview(&html))
     }
 
+    async fn text_preview(
+        &self,
+        id: u64,
+        format: Option<crate::domain::clipboard::ClipboardTextFormat>,
+    ) -> Result<crate::domain::clipboard::ClipboardTextPreview> {
+        let html = self
+            .request(|response| DbCommand::HtmlPayload(id, response))
+            .await?;
+        let is_html = html.is_some();
+        let source = match html {
+            Some(html) => html,
+            None => self.text_content(id).await?,
+        };
+        tokio::task::spawn_blocking(move || text_preview::build_preview(source, is_html, format))
+            .await
+            .map_err(|error| Error::Clipboard(error.to_string()))
+    }
+
+    async fn set_files(&self, paths: Vec<String>) -> Result<()> {
+        let paths = tokio::task::spawn_blocking(move || validate_file_paths(paths))
+            .await
+            .map_err(|error| Error::Clipboard(error.to_string()))??;
+        if !self.policy().await?.history_enabled {
+            return Err(Error::Clipboard(
+                "clipboard history is disabled or locked".into(),
+            ));
+        }
+        let payload = ClipboardPayload::Files(paths);
+        let fingerprints = clipboard_fingerprints(&payload);
+        self.write_system_clipboard(payload.clone(), true)?;
+        if let Some(record) = self
+            .store_payload(payload, Some("ArcRelay Nearby".into()), true)
+            .await?
+        {
+            self.commit_system_selection(&record, &fingerprints)?;
+        }
+        Ok(())
+    }
+
     async fn policy(&self) -> Result<ClipboardPolicy> {
         self.request(DbCommand::Policy).await
     }

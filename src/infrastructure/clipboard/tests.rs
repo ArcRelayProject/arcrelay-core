@@ -521,3 +521,16 @@ fn committed_local_selection_does_not_replace_a_newer_native_selection() {
     ));
     assert_eq!(state.selection.unwrap().key, newer);
 }
+
+#[test]
+fn only_existing_absolute_files_are_accepted() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let path = file.path().to_string_lossy().into_owned();
+    assert_eq!(
+        validate_file_paths(vec![path.clone(), path.clone()]).unwrap(),
+        vec![path]
+    );
+    assert!(validate_file_paths(vec![]).is_err());
+    assert!(validate_file_paths(vec!["relative.txt".into()]).is_err());
+    assert!(validate_file_paths(vec!["/missing-arcrelay-file".into()]).is_err());
+}
