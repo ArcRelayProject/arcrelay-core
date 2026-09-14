@@ -102,6 +102,7 @@ extern "C" {
         unicode_string: *const u16,
     );
     fn CGEventPost(tap: u32, event: CGEventRef);
+    fn CGEventPostToPid(pid: i32, event: CGEventRef);
     fn CFRelease(value: *const c_void);
 }
 
@@ -141,8 +142,12 @@ impl PasteKeyEvent {
         }
     }
 
-    fn post(&self) {
-        unsafe { CGEventPost(K_CG_HID_EVENT_TAP, self.0) };
+    fn post_to_pid(&self, pid: i32) {
+        // The clipboard chooser is a non-activating key panel. Even after it
+        // orders out, the global HID stream can briefly retain the panel's
+        // WindowServer key-focus route. Address the already validated target
+        // process directly so that transition cannot swallow Cmd+V.
+        unsafe { CGEventPostToPid(pid, self.0) };
     }
 }
 
@@ -701,21 +706,28 @@ impl NativeInputControl {
         // leave an unmatched key-down. No global Command state is mutated.
         let down = PasteKeyEvent::new(state.event_source(), true)?;
         let up = PasteKeyEvent::new(state.event_source(), false)?;
-        if target_pid.is_none()
-            || objc2_app_kit::NSWorkspace::sharedWorkspace()
-                .frontmostApplication()
-                .map(|app| app.processIdentifier())
-                != target_pid
+        let Some(target_pid) = target_pid else {
+            return Err(Error::InputControl(
+                "paste target or clipboard changed; paste cancelled".into(),
+            ));
+        };
+        if objc2_app_kit::NSWorkspace::sharedWorkspace()
+            .frontmostApplication()
+            .map(|app| app.processIdentifier())
+            != Some(target_pid)
             || objc2_app_kit::NSPasteboard::generalPasteboard().changeCount() != clipboard_version
         {
             return Err(Error::InputControl(
                 "paste target or clipboard changed; paste cancelled".into(),
             ));
         }
-        down.post();
+        down.post_to_pid(target_pid);
         std::thread::sleep(Duration::from_millis(50));
-        up.post();
+        up.post_to_pid(target_pid);
         tracing::debug!(
+            event = "clipboard.paste.shortcut_posted",
+            target_pid,
+            delivery = "process",
             flags = PASTE_COMMAND_FLAGS,
             "posted macOS clipboard paste shortcut"
         );
