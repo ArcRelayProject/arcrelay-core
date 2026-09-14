@@ -105,11 +105,13 @@ impl ClipboardRepository for NativeClipboard {
 
     async fn set_text(&self, content: &str) -> Result<()> {
         let payload = ClipboardPayload::Text(content.to_string());
+        let fingerprints = clipboard_fingerprints(&payload);
         self.write_system_clipboard(payload.clone(), true)?;
         if let Some(record) = self
             .store_payload(payload, Some("ArcRelay Mobile".into()), true)
             .await?
         {
+            self.commit_system_selection(&record, &fingerprints)?;
             let _ = self.sync_tx.send(record);
         }
         Ok(())
@@ -131,11 +133,13 @@ impl ClipboardRepository for NativeClipboard {
             (payload, mode) => convert_payload(&payload, mode)?,
         };
         let kind = payload_kind(&payload);
+        let fingerprints = clipboard_fingerprints(&payload);
         self.write_system_clipboard(payload.clone(), false)?;
         if let Some(record) = self
             .store_payload(payload, Some("ArcRelay".into()), true)
             .await?
         {
+            self.commit_system_selection(&record, &fingerprints)?;
             let _ = self.sync_tx.send(record);
         }
         Ok(kind)

@@ -78,6 +78,25 @@ struct ClipboardSelection {
 }
 
 impl ClipboardCaptureState {
+    fn commit_local_selection(
+        &mut self,
+        fingerprints: &ClipboardFingerprints,
+        key: ClipboardSelectionKey,
+    ) -> bool {
+        let pending_local_write = self.current.as_ref().is_some_and(|current| {
+            current.matches(fingerprints)
+                && self.selection.as_ref().is_some_and(|selection| {
+                    selection.applied
+                        && selection.key.2 == fingerprints.content_hash
+                        && selection.key.3 == 0
+                })
+        });
+        if pending_local_write {
+            self.selection = Some(ClipboardSelection { key, applied: true });
+        }
+        pending_local_write
+    }
+
     fn apply_selection(
         &mut self,
         key: ClipboardSelectionKey,
@@ -426,6 +445,16 @@ impl NativeClipboard {
         if state.apply_selection(key, || write_payload(&context, payload, true))? {
             state.remember_write(fingerprints, Instant::now());
         }
+        Ok(())
+    }
+
+    fn commit_system_selection(
+        &self,
+        record: &ClipboardSyncRecord,
+        fingerprints: &ClipboardFingerprints,
+    ) -> Result<()> {
+        let mut state = lock_capture_state(&self.capture_state)?;
+        state.commit_local_selection(fingerprints, ClipboardSelectionKey::from_record(record));
         Ok(())
     }
 

@@ -77,7 +77,7 @@ fn external_origin_for_formats(formats: &[String]) -> NativeClipboardOrigin {
 }
 
 impl ClipboardFingerprints {
-    fn matches(&self, other: &Self) -> bool {
+    pub(super) fn matches(&self, other: &Self) -> bool {
         self.content_hash == other.content_hash || self.semantic_hash == other.semantic_hash
     }
 }

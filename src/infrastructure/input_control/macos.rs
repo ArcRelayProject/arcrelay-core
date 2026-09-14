@@ -674,11 +674,7 @@ impl NativeInputControl {
         Self::release_state(&mut state)
     }
 
-    fn paste_clipboard_sync(
-        state: &Mutex<InputState>,
-        target_pid: Option<i32>,
-        clipboard_version: isize,
-    ) -> Result<()> {
+    fn paste_clipboard_sync(state: &Mutex<InputState>, target_pid: Option<i32>) -> Result<()> {
         let mut state = state
             .lock()
             .map_err(|_| Error::InputControl("input state lock poisoned".into()))?;
@@ -715,10 +711,9 @@ impl NativeInputControl {
             .frontmostApplication()
             .map(|app| app.processIdentifier())
             != Some(target_pid)
-            || objc2_app_kit::NSPasteboard::generalPasteboard().changeCount() != clipboard_version
         {
             return Err(Error::InputControl(
-                "paste target or clipboard changed; paste cancelled".into(),
+                "paste target changed; paste cancelled".into(),
             ));
         }
         down.post_to_pid(target_pid);
@@ -793,7 +788,6 @@ impl InputControlRepository for NativeInputControl {
         let target_pid = objc2_app_kit::NSWorkspace::sharedWorkspace()
             .frontmostApplication()
             .map(|app| app.processIdentifier());
-        let clipboard_version = objc2_app_kit::NSPasteboard::generalPasteboard().changeCount();
         while physical_shortcut_modifiers() != 0 {
             if started.elapsed() >= Duration::from_millis(500) {
                 return Err(Error::InputControl(
@@ -806,23 +800,18 @@ impl InputControlRepository for NativeInputControl {
         let current_pid = objc2_app_kit::NSWorkspace::sharedWorkspace()
             .frontmostApplication()
             .map(|app| app.processIdentifier());
-        if target_pid.is_none()
-            || current_pid != target_pid
-            || objc2_app_kit::NSPasteboard::generalPasteboard().changeCount() != clipboard_version
-        {
+        if target_pid.is_none() || current_pid != target_pid {
             return Err(Error::InputControl(
-                "paste target or clipboard changed; paste cancelled".into(),
+                "paste target changed; paste cancelled".into(),
             ));
         }
         tracing::debug!(
             ?target_pid,
-            clipboard_version,
             wait_ms = started.elapsed().as_millis() as u64,
             "macOS paste modifiers ready"
         );
-        self.input_queue.exec_sync(|| {
-            Self::paste_clipboard_sync(self.state.as_ref(), target_pid, clipboard_version)
-        })
+        self.input_queue
+            .exec_sync(|| Self::paste_clipboard_sync(self.state.as_ref(), target_pid))
     }
 
     async fn release_all(&self) -> Result<()> {

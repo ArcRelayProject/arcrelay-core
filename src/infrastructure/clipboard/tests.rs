@@ -474,3 +474,50 @@ fn replica_native_write_retries_failed_selection_and_rejects_older_or_duplicate_
         ))
         .unwrap());
 }
+
+#[test]
+fn committed_local_selection_rejects_its_replica_echo() {
+    let fingerprints = ClipboardFingerprints {
+        content_hash: "content-hash".into(),
+        semantic_hash: "semantic-hash".into(),
+    };
+    let committed = ClipboardSelectionKey(1001, "local".into(), "sync-id".into(), 7);
+    let mut state = ClipboardCaptureState {
+        current: Some(fingerprints.clone()),
+        selection: Some(ClipboardSelection {
+            key: ClipboardSelectionKey(1000, "local".into(), "content-hash".into(), 0),
+            applied: true,
+        }),
+        writes: VecDeque::new(),
+    };
+
+    assert!(state.commit_local_selection(&fingerprints, committed.clone()));
+    assert!(!state
+        .apply_selection(committed, || panic!(
+            "replica echo must not rewrite the clipboard"
+        ))
+        .unwrap());
+}
+
+#[test]
+fn committed_local_selection_does_not_replace_a_newer_native_selection() {
+    let fingerprints = ClipboardFingerprints {
+        content_hash: "content-hash".into(),
+        semantic_hash: "semantic-hash".into(),
+    };
+    let newer = ClipboardSelectionKey(2000, "peer".into(), "newer".into(), 3);
+    let mut state = ClipboardCaptureState {
+        current: Some(fingerprints.clone()),
+        selection: Some(ClipboardSelection {
+            key: newer.clone(),
+            applied: true,
+        }),
+        writes: VecDeque::new(),
+    };
+
+    assert!(!state.commit_local_selection(
+        &fingerprints,
+        ClipboardSelectionKey(1001, "local".into(), "sync-id".into(), 7),
+    ));
+    assert_eq!(state.selection.unwrap().key, newer);
+}
