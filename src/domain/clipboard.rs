@@ -44,6 +44,8 @@ pub enum ClipboardPasteMode {
     JsonCompact,
     JsonFormatted,
     Yaml,
+    ImageJpg,
+    ImagePng,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

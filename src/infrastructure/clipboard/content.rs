@@ -1,5 +1,264 @@
 use super::*;
 
+pub(super) struct EncodedClipboardImage {
+    pub mode: ClipboardPasteMode,
+    pub bytes: Vec<u8>,
+}
+
+// History and replication stay PNG-only; the requested encoding is a native
+// clipboard representation, not a change to the shared payload schema.
+pub(super) fn prepare_encoded_image(
+    payload: ClipboardPayload,
+    mode: ClipboardPasteMode,
+) -> Result<(ClipboardPayload, Option<EncodedClipboardImage>)> {
+    let ClipboardPayload::Image { ref png, .. } = payload else {
+        return Err(Error::Clipboard(
+            "this paste format is only available for image records".into(),
+        ));
+    };
+    if !matches!(
+        mode,
+        ClipboardPasteMode::ImageJpg | ClipboardPasteMode::ImagePng
+    ) {
+        return Err(Error::Clipboard("unsupported image paste format".into()));
+    }
+    use image::ImageDecoder;
+    let decoder = image::codecs::png::PngDecoder::new(std::io::Cursor::new(png))
+        .map_err(|error| Error::Clipboard(format!("read clipboard image: {error}")))?;
+    let (width, height) = decoder.dimensions();
+    drop(decoder);
+    if width > 16_384
+        || height > 16_384
+        || u64::from(width) * u64::from(height) * 16 > 256 * 1024 * 1024
+    {
+        return Err(Error::Clipboard(
+            "clipboard image exceeds conversion budget".into(),
+        ));
+    }
+    let mut reader =
+        image::ImageReader::with_format(std::io::Cursor::new(png), image::ImageFormat::Png);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    reader.limits(limits);
+    let rgba = reader
+        .decode()
+        .map_err(|error| Error::Clipboard(format!("decode clipboard image: {error}")))?
+        .into_rgba8();
+    if mode == ClipboardPasteMode::ImagePng {
+        let bytes = png.clone();
+        return Ok((payload, Some(EncodedClipboardImage { mode, bytes })));
+    }
+    let (width, height) = rgba.dimensions();
+    let rgb = image::RgbImage::from_fn(width, height, |x, y| {
+        let pixel = rgba.get_pixel(x, y);
+        let alpha = u32::from(pixel[3]);
+        image::Rgb(std::array::from_fn(|channel| {
+            ((u32::from(pixel[channel]) * alpha + 255 * (255 - alpha) + 127) / 255) as u8
+        }))
+    });
+    drop(rgba);
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 95)
+        .encode_image(&rgb)
+        .map_err(|error| Error::Clipboard(format!("encode JPG: {error}")))?;
+    drop(rgb);
+    // Fingerprints and bitmap fallbacks must describe the actual JPEG pixels,
+    // including its lossy encoding, to avoid recapturing our own paste.
+    let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg)
+        .map_err(|error| Error::Clipboard(format!("decode JPG: {error}")))?;
+    let mut canonical_png = std::io::Cursor::new(Vec::new());
+    decoded
+        .write_to(&mut canonical_png, image::ImageFormat::Png)
+        .map_err(|error| Error::Clipboard(format!("normalize JPG: {error}")))?;
+    Ok((
+        ClipboardPayload::Image {
+            png: canonical_png.into_inner(),
+            width,
+            height,
+        },
+        Some(EncodedClipboardImage { mode, bytes }),
+    ))
+}
+
+pub(super) fn write_encoded_image(
+    context: &ClipboardContext,
+    payload: ClipboardPayload,
+    encoded: EncodedClipboardImage,
+    local_only: bool,
+) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = context;
+        macos::write_payload_as_image(payload, encoded, local_only)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = local_only;
+        let ClipboardPayload::Image { png, .. } = payload else {
+            return Err(Error::Clipboard("image payload is missing".into()));
+        };
+        let jpg = encoded.mode == ClipboardPasteMode::ImageJpg;
+        let mut contents = Vec::new();
+        // Windows bitmap-only recipients need a fallback. Put it first because
+        // clipboard-rs's set_image clears the clipboard on Windows.
+        #[cfg(target_os = "windows")]
+        contents.push(ClipboardContent::Image(
+            clipboard_rs::RustImageData::from_bytes(&png)
+                .map_err(|error| Error::Clipboard(format!("decode stored image: {error}")))?,
+        ));
+        let _ = png;
+        contents.push(ClipboardContent::Other(
+            if cfg!(target_os = "windows") {
+                if jpg {
+                    "JFIF"
+                } else {
+                    "PNG"
+                }
+            } else if jpg {
+                "image/jpeg"
+            } else {
+                "image/png"
+            }
+            .into(),
+            encoded.bytes.clone(),
+        ));
+        context
+            .set(contents)
+            .map_err(|error| Error::Clipboard(format!("write image format: {error}")))?;
+        let format = if cfg!(target_os = "windows") {
+            if jpg {
+                "JFIF"
+            } else {
+                "PNG"
+            }
+        } else if jpg {
+            "image/jpeg"
+        } else {
+            "image/png"
+        };
+        // clipboard-rs on Windows can report success after a failed setter.
+        if context.get_buffer(format).ok().as_deref() != Some(encoded.bytes.as_slice()) {
+            return Err(Error::Clipboard(
+                "image format write could not be verified; paste cancelled".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod image_paste_tests {
+    use super::*;
+
+    fn source(pixel: [u8; 4]) -> ClipboardPayload {
+        let image = image::RgbaImage::from_pixel(4, 3, image::Rgba(pixel));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        ClipboardPayload::Image {
+            png: png.into_inner(),
+            width: 4,
+            height: 3,
+        }
+    }
+
+    #[test]
+    fn png_paste_preserves_bytes_dimensions_and_transparency() {
+        let original = source([120, 60, 0, 128]);
+        let (payload, encoded) =
+            prepare_encoded_image(original.clone(), ClipboardPasteMode::ImagePng).unwrap();
+        assert_eq!(payload, original);
+        let encoded = encoded.unwrap();
+        assert_eq!(
+            image::guess_format(&encoded.bytes).unwrap(),
+            image::ImageFormat::Png
+        );
+        let image = image::load_from_memory(&encoded.bytes)
+            .unwrap()
+            .into_rgba8();
+        assert_eq!(image.dimensions(), (4, 3));
+        assert_eq!(image.get_pixel(0, 0).0, [120, 60, 0, 128]);
+    }
+
+    #[test]
+    fn jpg_paste_encodes_jpeg_and_flattens_alpha_on_white() {
+        for (pixel, expected) in [
+            ([0, 0, 0, 0], [255, 255, 255]),
+            ([0, 0, 0, 128], [127, 127, 127]),
+            ([40, 80, 120, 255], [40, 80, 120]),
+        ] {
+            let original = source(pixel);
+            let (payload, encoded) =
+                prepare_encoded_image(original.clone(), ClipboardPasteMode::ImageJpg).unwrap();
+            let encoded = encoded.unwrap();
+            assert_eq!(
+                image::guess_format(&encoded.bytes).unwrap(),
+                image::ImageFormat::Jpeg
+            );
+            let image = image::load_from_memory(&encoded.bytes).unwrap().into_rgb8();
+            assert_eq!(image.dimensions(), (4, 3));
+            for (actual, expected) in image.get_pixel(0, 0).0.into_iter().zip(expected) {
+                assert!(actual.abs_diff(expected) <= 3);
+            }
+            let ClipboardPayload::Image { png, .. } = payload else {
+                panic!("expected image");
+            };
+            assert_eq!(image::load_from_memory(&png).unwrap().into_rgb8(), image);
+            assert_eq!(
+                original,
+                source(pixel),
+                "conversion must not mutate the source"
+            );
+        }
+    }
+
+    #[test]
+    fn image_paste_rejects_oversized_dimensions() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::new(16_385, 1)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        for mode in [ClipboardPasteMode::ImageJpg, ClipboardPasteMode::ImagePng] {
+            assert!(prepare_encoded_image(
+                ClipboardPayload::Image {
+                    png: png.get_ref().clone(),
+                    width: 16_385,
+                    height: 1,
+                },
+                mode
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn image_paste_rejects_text_and_malformed_images() {
+        for mode in [ClipboardPasteMode::ImageJpg, ClipboardPasteMode::ImagePng] {
+            assert!(prepare_encoded_image(ClipboardPayload::Text("text".into()), mode).is_err());
+            assert!(convert_payload(&ClipboardPayload::Text("text".into()), mode).is_err());
+            assert!(prepare_encoded_image(
+                ClipboardPayload::Image {
+                    png: b"invalid".to_vec(),
+                    width: 1,
+                    height: 1,
+                },
+                mode
+            )
+            .is_err());
+        }
+        assert!(prepare_encoded_image(
+            ClipboardPayload::Image {
+                png: b"invalid".to_vec(),
+                width: 1,
+                height: 1
+            },
+            ClipboardPasteMode::ImageJpg
+        )
+        .is_err());
+    }
+}
+
 pub(super) fn payload_kind(payload: &ClipboardPayload) -> ClipboardContentKind {
     match payload {
         ClipboardPayload::Text(_) => ClipboardContentKind::Text,

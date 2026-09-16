@@ -60,6 +60,30 @@ pub(super) fn write_payload(payload: ClipboardPayload, local_only: bool) -> Resu
 }
 
 fn write_to(board: &NSPasteboard, payload: ClipboardPayload, local_only: bool) -> Result<()> {
+    write_to_as_image(board, payload, local_only, None)
+}
+
+pub(super) fn write_payload_as_image(
+    payload: ClipboardPayload,
+    encoded: EncodedClipboardImage,
+    local_only: bool,
+) -> Result<()> {
+    autoreleasepool(|_| {
+        write_to_as_image(
+            &NSPasteboard::generalPasteboard(),
+            payload,
+            local_only,
+            Some(encoded),
+        )
+    })
+}
+
+fn write_to_as_image(
+    board: &NSPasteboard,
+    payload: ClipboardPayload,
+    local_only: bool,
+    encoded: Option<EncodedClipboardImage>,
+) -> Result<()> {
     let item = NSPasteboardItem::new();
     let mut items = Vec::new();
     let set_string = |item: &NSPasteboardItem, value: &str, kind: &NSString| {
@@ -97,7 +121,16 @@ fn write_to(board: &NSPasteboard, payload: ClipboardPayload, local_only: bool) -
         ClipboardPayload::Image { png, .. } => {
             image::load_from_memory_with_format(&png, image::ImageFormat::Png)
                 .map_err(|error| Error::Clipboard(format!("decode stored image: {error}")))?;
-            item.setData_forType(&NSData::with_bytes(&png), unsafe { NSPasteboardTypePNG })
+            if let Some(encoded) = encoded {
+                let kind = NSString::from_str(if encoded.mode == ClipboardPasteMode::ImageJpg {
+                    "public.jpeg"
+                } else {
+                    "public.png"
+                });
+                item.setData_forType(&NSData::with_bytes(&encoded.bytes), &kind)
+            } else {
+                item.setData_forType(&NSData::with_bytes(&png), unsafe { NSPasteboardTypePNG })
+            }
         }
         ClipboardPayload::Files(paths) => {
             for path in paths {
@@ -234,6 +267,44 @@ fn write_is_visible(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_image_format_writes_only_the_requested_representation() {
+        autoreleasepool(|_| {
+            for (mode, kind, absent) in [
+                (ClipboardPasteMode::ImageJpg, "public.jpeg", "public.png"),
+                (ClipboardPasteMode::ImagePng, "public.png", "public.jpeg"),
+            ] {
+                let mut png = std::io::Cursor::new(Vec::new());
+                image::RgbaImage::from_pixel(2, 2, image::Rgba([50, 100, 150, 128]))
+                    .write_to(&mut png, image::ImageFormat::Png)
+                    .unwrap();
+                let (payload, encoded) = prepare_encoded_image(
+                    ClipboardPayload::Image {
+                        png: png.into_inner(),
+                        width: 2,
+                        height: 2,
+                    },
+                    mode,
+                )
+                .unwrap();
+                let encoded = encoded.unwrap();
+                let expected = encoded.bytes.clone();
+                let board = NSPasteboard::pasteboardWithUniqueName();
+                write_to_as_image(&board, payload, true, Some(encoded)).unwrap();
+                assert_eq!(
+                    board
+                        .dataForType(&NSString::from_str(kind))
+                        .unwrap()
+                        .to_vec(),
+                    expected
+                );
+                assert!(board.dataForType(&NSString::from_str(absent)).is_none());
+                assert_eq!(stamp_for(&board).origin, NativeClipboardOrigin::ArcRelay);
+                board.clearContents();
+            }
+        });
+    }
 
     #[test]
     fn readiness_requires_all_bytes_and_rejects_replaced_clipboard() {
