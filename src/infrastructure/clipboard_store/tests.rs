@@ -1,5 +1,115 @@
 use super::*;
 
+#[tokio::test]
+async fn waiting_for_file_metadata_does_not_hold_the_database_writer() {
+    let store = SqliteClipboardStore::connect(None).await.unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("source.txt");
+    std::fs::write(&path, "source").unwrap();
+    let held = FILE_METADATA_SLOTS.acquire_many(2).await.unwrap();
+    let pending = store.store(
+        ClipboardPayload::Files(vec![path.to_string_lossy().into_owned()]),
+        "slow-file".into(),
+        summary(ClipboardContentKind::Files, "source.txt"),
+        true,
+        "local",
+        "Local",
+        true,
+    );
+    tokio::pin!(pending);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut pending)
+            .await
+            .is_err()
+    );
+    let text = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        store.store(
+            ClipboardPayload::Text("interactive".into()),
+            "interactive-text".into(),
+            summary(ClipboardContentKind::Text, "interactive"),
+            true,
+            "local",
+            "Local",
+            true,
+        ),
+    )
+    .await
+    .expect("file metadata admission must not hold a database transaction")
+    .unwrap()
+    .unwrap();
+    assert_eq!(text.text.as_deref(), Some("interactive"));
+    drop(held);
+    assert!(pending.await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn ocr_backfill_is_bounded_and_skips_completed_current_models() {
+    let store = SqliteClipboardStore::connect(None).await.unwrap();
+    let mut expected = Vec::new();
+    for index in 0..70 {
+        let record = store
+            .store(
+                ClipboardPayload::Image {
+                    png: vec![index as u8],
+                    width: 1,
+                    height: 1,
+                },
+                format!("batch-image-{index}"),
+                summary(ClipboardContentKind::Image, "image"),
+                true,
+                "local",
+                "Local",
+                true,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let id = store
+            .ensure_image_ocr_pending(&record.sync_id, "current", false)
+            .await
+            .unwrap()
+            .unwrap();
+        if index % 2 == 0 {
+            store
+                .save_image_ocr(
+                    id,
+                    ClipboardImageOcr {
+                        text: "retained".into(),
+                        blocks: vec![],
+                        model_version: "current".into(),
+                        updated_at_ms: 1,
+                    },
+                )
+                .await
+                .unwrap();
+        } else {
+            expected.push(id);
+        }
+    }
+    let first = store.backfill_image_ocr_batch("current", 0).await.unwrap();
+    assert_eq!(first.len(), 32);
+    let second = store
+        .backfill_image_ocr_batch("current", *first.last().unwrap() as i64)
+        .await
+        .unwrap();
+    assert_eq!(second.len(), 3);
+    assert!(store
+        .backfill_image_ocr_batch("current", *second.last().unwrap() as i64)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!([first, second].concat(), expected);
+    assert_eq!(
+        store
+            .backfill_image_ocr_batch("upgraded", 0)
+            .await
+            .unwrap()
+            .len(),
+        32
+    );
+}
+
 #[test]
 fn legacy_timeline_migration_preserves_history_and_runs_from_a_plain_thread() {
     let runtime = tokio::runtime::Builder::new_current_thread()

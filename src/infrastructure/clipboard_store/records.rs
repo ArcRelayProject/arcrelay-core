@@ -114,6 +114,12 @@ impl SqliteClipboardStore {
         source_device_name: &str,
         live: bool,
     ) -> Result<Option<ClipboardSyncRecord>, DbErr> {
+        let available = match &payload {
+            ClipboardPayload::Files(paths) => files_available(paths.clone()).await?,
+            _ => true,
+        };
+        let mut stored = StoredValues::from_payload(payload)?;
+        stored.available = available;
         let transaction = self.db.begin().await?;
         let state = clipboard_state::Entity::find_by_id(STATE_ID)
             .one(&transaction)
@@ -143,7 +149,6 @@ impl SqliteClipboardStore {
         } else {
             wall_time
         };
-        let stored = StoredValues::from_payload(payload)?;
         let character_count = stored.character_count(summary.kind);
         let sync_id = sync_id_from_hash(&content_hash);
         summary.captured_at = Utc
@@ -461,7 +466,7 @@ impl SqliteClipboardStore {
             .await?
             .ok_or_else(|| DbErr::Custom(format!("clipboard payload {id} is missing")))?;
         let paths = decode_paths(stored.files_json.as_deref())?;
-        if paths.is_empty() || paths.iter().any(|path| !Path::new(path).exists()) {
+        if paths.is_empty() || !files_available(paths.clone()).await? {
             return Err(DbErr::Custom(
                 "one or more clipboard files are unavailable".into(),
             ));
@@ -532,7 +537,7 @@ impl SqliteClipboardStore {
             .ok_or_else(|| DbErr::Custom(format!("clipboard payload {id} is missing")))?;
         let payload = model_to_payload(&model, &stored)?;
         if let ClipboardPayload::Files(paths) = &payload {
-            if paths.iter().any(|path| !Path::new(path).exists()) {
+            if !files_available(paths.clone()).await? {
                 return Err(DbErr::Custom(format!(
                     "clipboard record {id} references a missing file"
                 )));

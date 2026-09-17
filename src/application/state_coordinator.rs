@@ -47,6 +47,14 @@ pub struct MediaState {
 
 /// The coordinator manages all domain channels from a single place.
 pub struct StateCoordinator {
+    state: Arc<CoordinatorState>,
+    tasks: BackgroundTasks,
+    shutdown_gate: Mutex<()>,
+}
+
+/// Shared snapshot state. Sampling tasks retain this state, never their owner.
+#[doc(hidden)]
+pub struct CoordinatorState {
     service: Arc<ArcRelayService>,
 
     // Revision counters (one per domain)
@@ -101,7 +109,7 @@ impl StateCoordinator {
         let (window_tx, _) = watch::channel(None);
         let (clipboard_tx, _) = watch::channel(None);
 
-        Arc::new(Self {
+        let state = Arc::new(CoordinatorState {
             service,
             system_rev: AtomicU64::new(0),
             process_rev: AtomicU64::new(0),
@@ -125,21 +133,82 @@ impl StateCoordinator {
             media_interest: Notify::new(),
             window_interest: Notify::new(),
             clipboard_interest: Notify::new(),
+        });
+        Arc::new(Self {
+            state,
+            tasks: BackgroundTasks::default(),
+            shutdown_gate: Mutex::new(()),
         })
     }
 
-    /// Start the shared event/sampling coordinators. Call once after construction.
+    /// Start once on the long-lived runtime. Repeated calls are harmless.
     pub fn start(self: &Arc<Self>) {
-        let this = Arc::clone(self);
-        tokio::spawn(async move { this.system_loop().await });
-        let this = Arc::clone(self);
-        tokio::spawn(async move { this.media_loop().await });
-        let this = Arc::clone(self);
-        tokio::spawn(async move { this.window_focus_loop().await });
-        let this = Arc::clone(self);
-        tokio::spawn(async move { this.clipboard_loop().await });
+        self.tasks.start(|| {
+            let mut tasks = Vec::new();
+            let state = self.state.clone();
+            tasks.push(tokio::spawn(async move { state.system_loop().await }));
+            let state = self.state.clone();
+            tasks.push(tokio::spawn(async move { state.media_loop().await }));
+            let state = self.state.clone();
+            tasks.push(tokio::spawn(async move { state.window_focus_loop().await }));
+            let state = self.state.clone();
+            tasks.push(tokio::spawn(async move { state.clipboard_loop().await }));
+            tasks
+        });
     }
 
+    /// Stop and join every sampling task. This coordinator cannot restart;
+    /// construct a new owner when composing a replacement runtime.
+    pub async fn shutdown(&self) {
+        let _guard = self.shutdown_gate.lock().await;
+        for task in self.tasks.stop() {
+            let _ = task.await;
+        }
+    }
+}
+
+impl std::ops::Deref for StateCoordinator {
+    type Target = CoordinatorState;
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+#[derive(Default)]
+struct BackgroundTasks(std::sync::Mutex<(bool, Vec<tokio::task::JoinHandle<()>>)>);
+
+impl BackgroundTasks {
+    fn start(&self, spawn: impl FnOnce() -> Vec<tokio::task::JoinHandle<()>>) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.0 {
+            return;
+        }
+        state.0 = true;
+        state.1 = spawn();
+    }
+    fn stop(&self) -> Vec<tokio::task::JoinHandle<()>> {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.0 = true;
+        let tasks = std::mem::take(&mut state.1);
+        for task in &tasks {
+            task.abort();
+        }
+        tasks
+    }
+}
+impl Drop for BackgroundTasks {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+impl CoordinatorState {
     // ── System polling (every 3 s) ─────────────────────────────────
 
     async fn system_loop(&self) {
@@ -610,6 +679,32 @@ async fn wait_for_change(receiver: &mut broadcast::Receiver<()>, debounce: Durat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_owner_constructs_and_stops_without_tokio() {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let tasks = BackgroundTasks::default();
+        assert!(tasks.stop().is_empty());
+        tasks.start(|| panic!("stopped owners must not start"));
+    }
+
+    #[tokio::test]
+    async fn task_owner_starts_once_and_releases_retained_state_on_drop() {
+        let state = Arc::new(());
+        let weak = Arc::downgrade(&state);
+        let tasks = BackgroundTasks::default();
+        tasks.start(|| {
+            vec![tokio::spawn(async move {
+                let _state = state;
+                std::future::pending::<()>().await;
+            })]
+        });
+        tasks.start(|| panic!("duplicate sampling loops"));
+        tokio::task::yield_now().await;
+        drop(tasks);
+        tokio::task::yield_now().await;
+        assert!(weak.upgrade().is_none());
+    }
 
     #[tokio::test]
     async fn wait_for_change_coalesces_a_notification_burst() {

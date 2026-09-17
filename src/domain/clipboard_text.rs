@@ -13,6 +13,17 @@ pub fn convert_payload(
     if mode == ClipboardPasteMode::Source {
         return Ok(payload.clone());
     }
+    if matches!(
+        mode,
+        ClipboardPasteMode::ImageJpg | ClipboardPasteMode::ImagePng
+    ) {
+        return match payload {
+            ClipboardPayload::Image { .. } => Ok(payload.clone()),
+            _ => Err(Error::Clipboard(
+                "this paste format is only available for image records".into(),
+            )),
+        };
+    }
     let text = match payload {
         ClipboardPayload::Text(text) => text.clone(),
         ClipboardPayload::RichText { plain_text, .. } => plain_text.clone(),
@@ -23,7 +34,9 @@ pub fn convert_payload(
         }
     };
     match mode {
-        ClipboardPasteMode::Source => unreachable!(),
+        ClipboardPasteMode::Source
+        | ClipboardPasteMode::ImageJpg
+        | ClipboardPasteMode::ImagePng => unreachable!(),
         ClipboardPasteMode::PlainText => Ok(ClipboardPayload::Text(text)),
         ClipboardPasteMode::RichText => match payload {
             ClipboardPayload::RichText { .. } => Ok(payload.clone()),

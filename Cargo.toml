@@ -39,8 +39,8 @@ path = "src/bin/debug_cli.rs"
 required-features = ["native"]
 
 [dependencies]
-arcrelay-content = { optional = true, version = "0.1.0", git = "https://github.com/ArcRelayProject/arcrelay-content.git", rev = "a4b00f20f1e03c2905abe9bae36c601fb7683e1c" }
-arcrelay-input = { version = "0.1.0", git = "https://github.com/ArcRelayProject/arcrelay-input.git", rev = "1114b32ec72c0e9ce93fca61e6d215c173f54e9d" }
+arcrelay-content = { optional = true, version = "0.1.0", git = "https://github.com/ArcRelayProject/arcrelay-content.git", rev = "85c59c2358c712b488faef36c9a5c4ff36b4d129" }
+arcrelay-input = { version = "0.1.0", git = "https://github.com/ArcRelayProject/arcrelay-input.git", rev = "63ece7b899e1854ee38b94d8c6f062efdbf23fbb" }
 ts-rs = { version = "12", features = ["serde-json-impl", "chrono-impl", "uuid-impl", "no-serde-warnings"] }
 regex = "1"
 unicode-segmentation = "1"
@@ -56,7 +56,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = { version = "0.2", optional = true }
 clipboard-rs = { version = "0.3.5", optional = true }
 ocr-rs = { optional = true, git = "https://github.com/zibo-chen/rust-paddle-ocr", rev = "f838a085c39beb722a315727ec13a90eed496f2c" }
-image = { optional = true, version = "0.25", default-features = false, features = ["png"] }
+image = { optional = true, version = "0.25", default-features = false, features = ["png", "jpeg"] }
 ammonia = { version = "4", optional = true }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"], optional = true }
 hostname = { version = "0.4", optional = true }

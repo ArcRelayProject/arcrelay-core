@@ -403,6 +403,15 @@ impl NativeClipboard {
     }
 
     fn write_system_clipboard(&self, payload: ClipboardPayload, local_only: bool) -> Result<()> {
+        self.write_system_clipboard_as(payload, local_only, None)
+    }
+
+    fn write_system_clipboard_as(
+        &self,
+        payload: ClipboardPayload,
+        local_only: bool,
+        encoded_image: Option<EncodedClipboardImage>,
+    ) -> Result<()> {
         let context = self
             .context
             .lock()
@@ -411,7 +420,10 @@ impl NativeClipboard {
         // The DB worker never takes this lock.
         let mut state = lock_capture_state(&self.capture_state)?;
         let fingerprints = clipboard_fingerprints(&payload);
-        write_payload(&context, payload, local_only)?;
+        match encoded_image {
+            Some(image) => write_encoded_image(&context, payload, image, local_only)?,
+            None => write_payload(&context, payload, local_only)?,
+        }
         state.selection = Some(ClipboardSelection {
             key: ClipboardSelectionKey(
                 chrono::Utc::now().timestamp_millis().max(
