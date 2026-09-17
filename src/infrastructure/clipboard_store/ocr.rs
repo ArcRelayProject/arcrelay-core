@@ -136,28 +136,42 @@ impl SqliteClipboardStore {
         Ok(Some(entry.id.max(0) as u64))
     }
 
-    pub(in crate::infrastructure) async fn backfill_image_ocr_jobs(
+    /// Select only stale/missing work and update a bounded batch on the writer.
+    /// The keyset cursor visits pending rows once during this startup pass.
+    pub(in crate::infrastructure) async fn backfill_image_ocr_batch(
         &self,
         model_version: &str,
+        after_id: i64,
     ) -> Result<Vec<u64>, DbErr> {
-        let sync_ids = clipboard_entry::Entity::find()
-            .select_only()
-            .column(clipboard_entry::Column::SyncId)
-            .filter(clipboard_entry::Column::Deleted.eq(false))
-            .filter(clipboard_entry::Column::Kind.eq(kind_to_i32(ClipboardContentKind::Image)))
-            .into_tuple::<String>()
-            .all(&self.db)
-            .await?;
-        let mut jobs = Vec::new();
-        for sync_id in sync_ids {
-            if let Some(id) = self
-                .ensure_image_ocr_pending(&sync_id, model_version, true)
-                .await?
-            {
-                jobs.push(id);
-            }
+        let transaction = self.db.begin().await?;
+        let rows = transaction.query_all(Statement::from_sql_and_values(
+            sea_orm::DbBackend::Sqlite,
+            "SELECT e.id FROM clipboard_entries e LEFT JOIN clipboard_image_ocr o ON o.entry_id=e.id WHERE e.id>? AND e.deleted=0 AND e.kind=? AND (o.entry_id IS NULL OR o.model_version<>? OR o.status<>?) ORDER BY e.id LIMIT 32",
+            [after_id.into(), kind_to_i32(ClipboardContentKind::Image).into(), model_version.into(), OCR_STATUS_COMPLETED.into()],
+        )).await?;
+        let ids = rows
+            .into_iter()
+            .map(|row| row.try_get::<i64>("", "id"))
+            .collect::<Result<Vec<_>, _>>()?;
+        if !ids.is_empty() {
+            let placeholders = std::iter::repeat_n("?", ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut values: Vec<sea_orm::Value> =
+                vec![model_version.into(), Utc::now().timestamp_millis().into()];
+            values.extend(ids.iter().copied().map(Into::into));
+            transaction.execute(Statement::from_sql_and_values(
+                sea_orm::DbBackend::Sqlite,
+                format!("INSERT INTO clipboard_image_ocr(entry_id,status,full_text,error,model_version,updated_at_ms) SELECT id,0,'',NULL,?,? FROM clipboard_entries WHERE id IN ({placeholders}) ON CONFLICT(entry_id) DO UPDATE SET status=0,full_text='',error=NULL,model_version=excluded.model_version,updated_at_ms=excluded.updated_at_ms"),
+                values,
+            )).await?;
+            clipboard_ocr_block::Entity::delete_many()
+                .filter(clipboard_ocr_block::Column::EntryId.is_in(ids.clone()))
+                .exec(&transaction)
+                .await?;
         }
-        Ok(jobs)
+        transaction.commit().await?;
+        Ok(ids.into_iter().map(|id| id.max(0) as u64).collect())
     }
 
     pub(in crate::infrastructure) async fn save_image_ocr(

@@ -119,14 +119,6 @@ pub(super) fn start_database_worker(
                         return;
                     }
                 };
-                match store.backfill_image_ocr_jobs(OCR_MODEL_VERSION).await {
-                    Ok(jobs) => {
-                        for id in jobs {
-                            let _ = ocr_job_tx.send(Some(OcrJob { id, urgent: false }));
-                        }
-                    }
-                    Err(error) => warn!(%error, "failed to schedule clipboard OCR backfill"),
-                }
                 let reader = match store.reader(database_path.as_deref()).await {
                     Ok(reader) => Arc::new(reader),
                     Err(error) => { warn!(%error, "failed to open clipboard query connection"); return; }
@@ -152,8 +144,30 @@ pub(super) fn start_database_worker(
                     }
                     while queries.join_next().await.is_some() {}
                 });
+                let mut backfill_cursor = Some(0_i64);
                 loop {
-                    if *stopping.borrow() { rx.close(); }
+                    if *stopping.borrow() { rx.close(); backfill_cursor = None; }
+                    // Readers are already serving requests. Backfill yields to
+                    // queued interactive writes between each bounded SQL batch.
+                    if rx.is_empty() {
+                        if let Some(cursor) = backfill_cursor {
+                            match store.backfill_image_ocr_batch(OCR_MODEL_VERSION, cursor).await {
+                                Ok(jobs) => {
+                                    backfill_cursor = jobs.last().map(|id| *id as i64);
+                                    for id in jobs {
+                                        if *stopping.borrow() { break; }
+                                        let _ = ocr_job_tx.send(Some(OcrJob { id, urgent: false }));
+                                    }
+                                }
+                                Err(error) => {
+                                    warn!(%error, "failed to schedule clipboard OCR backfill");
+                                    backfill_cursor = None;
+                                }
+                            }
+                            tokio::task::yield_now().await;
+                            continue;
+                        }
+                    }
                     let command = if store.take_maintenance() {
                         match rx.try_recv() {
                             Ok(command) => {

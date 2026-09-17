@@ -118,7 +118,8 @@ impl StoredValues {
                 plain_text_payload: None,
                 rtf_payload: None,
                 image_png: None,
-                available: paths.iter().all(|path| Path::new(path).exists()),
+                // Filesystem observations are supplied before the database transaction.
+                available: false,
                 files_json: Some(
                     serde_json::to_string(&paths)
                         .map_err(|error| DbErr::Custom(format!("encode file paths: {error}")))?,
@@ -647,4 +648,20 @@ fn kind_from_i32(kind: i32) -> Result<ClipboardContentKind, DbErr> {
         4 => Ok(ClipboardContentKind::Files),
         _ => Err(DbErr::Custom(format!("invalid clipboard kind {kind}"))),
     }
+}
+
+// Keep slow external/network filesystem calls off the single-thread database
+// runtime. Permits remain owned by the blocking work if its caller is cancelled.
+static FILE_METADATA_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+async fn files_available(paths: Vec<String>) -> Result<bool, DbErr> {
+    let permit = FILE_METADATA_SLOTS
+        .acquire()
+        .await
+        .map_err(|error| DbErr::Custom(error.to_string()))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        paths.iter().all(|path| Path::new(path).exists())
+    })
+    .await
+    .map_err(|error| DbErr::Custom(format!("file metadata worker: {error}")))
 }
