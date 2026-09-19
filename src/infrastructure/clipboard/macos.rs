@@ -119,8 +119,7 @@ fn write_to_as_image(
             ok
         }
         ClipboardPayload::Image { png, .. } => {
-            image::load_from_memory_with_format(&png, image::ImageFormat::Png)
-                .map_err(|error| Error::Clipboard(format!("decode stored image: {error}")))?;
+            decode_image_png(&png)?;
             if let Some(encoded) = encoded {
                 let kind = NSString::from_str(if encoded.mode == ClipboardPasteMode::ImageJpg {
                     "public.jpeg"
