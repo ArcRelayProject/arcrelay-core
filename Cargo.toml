@@ -111,6 +111,9 @@ windows = { optional = true, version = "0.58", features = [
 ] }
 windows-core = { version = "0.58", optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+sysinfo = { version = "0.33", optional = true }
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3"

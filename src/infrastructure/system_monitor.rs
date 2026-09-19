@@ -313,3 +313,19 @@ impl SystemMonitorRepository for SysInfoMonitor {
         Ok(self.collect_snapshot().await?.network)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constructs_without_a_tokio_runtime_and_defers_slow_detection() {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let monitor = SysInfoMonitor::new();
+        assert!(monitor.gpu_names.get().is_none());
+        let state = monitor.state.lock().unwrap();
+        assert!(state.slow_sample.is_none());
+        assert!(state.last_slow_refresh.is_none());
+        assert!(state.components.is_empty());
+    }
+}

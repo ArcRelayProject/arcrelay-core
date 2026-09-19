@@ -5,9 +5,9 @@ mod clipboard_store;
 pub mod device;
 pub mod input_control;
 pub mod media_control;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub mod process;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub mod system_monitor;
 pub mod window_manager;
 

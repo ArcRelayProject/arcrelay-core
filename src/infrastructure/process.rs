@@ -127,3 +127,15 @@ impl ProcessRepository for SysInfoProcessRepo {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constructs_without_a_tokio_runtime() {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let repo = SysInfoProcessRepo::new();
+        assert!(repo.cache.lock().unwrap().is_none());
+    }
+}
