@@ -39,8 +39,8 @@ path = "src/bin/debug_cli.rs"
 required-features = ["native"]
 
 [dependencies]
-arcrelay-content = { optional = true, version = "0.1.0", git = "https://github.com/ArcRelayProject/arcrelay-content.git", rev = "85c59c2358c712b488faef36c9a5c4ff36b4d129" }
-arcrelay-input = { version = "0.1.0", git = "https://github.com/ArcRelayProject/arcrelay-input.git", rev = "63ece7b899e1854ee38b94d8c6f062efdbf23fbb" }
+arcrelay-content = { optional = true, version = "0.1.0", git = "https://github.com/ArcRelayProject/arcrelay-content.git", rev = "b4b24071b70b4a81e239fb6ae76ca3ac204a4d21" }
+arcrelay-input = { version = "0.1.0", git = "https://github.com/ArcRelayProject/arcrelay-input.git", rev = "9d771717620d4e59a0266bda5480f5504b5c869d" }
 ts-rs = { version = "12", features = ["serde-json-impl", "chrono-impl", "uuid-impl", "no-serde-warnings"] }
 regex = "1"
 unicode-segmentation = "1"
