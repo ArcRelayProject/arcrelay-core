@@ -250,6 +250,12 @@ pub(super) async fn handle_database_command(
         DbCommand::TextContent(id, response) => {
             let _ = response.send(store.text_content(id).await.map_err(db_error));
         }
+        DbCommand::ExportRecords(ids, response) => {
+            let _ = response.send(store.export_records(ids).await.map_err(db_error));
+        }
+        DbCommand::ValidateExport(versions, response) => {
+            let _ = response.send(store.validate_export(versions).await.map_err(db_error));
+        }
         DbCommand::HtmlPayload(id, response) => {
             let _ = response.send(store.html_payload(id).await.map_err(db_error));
         }

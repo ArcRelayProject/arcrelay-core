@@ -144,6 +144,17 @@ impl ClipboardApplicationService {
         self.repository.text_content(id).await
     }
 
+    pub async fn export_records(
+        &self,
+        ids: Vec<u64>,
+    ) -> Result<Vec<crate::domain::clipboard::ClipboardExportRecord>> {
+        self.repository.export_records(ids).await
+    }
+
+    pub async fn validate_export(&self, versions: Vec<(u64, String)>) -> Result<bool> {
+        self.repository.validate_export(versions).await
+    }
+
     pub async fn text_preview(
         &self,
         id: u64,

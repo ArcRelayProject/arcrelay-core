@@ -84,6 +84,16 @@ impl ClipboardRepository for NativeClipboard {
             .await
     }
 
+    async fn export_records(&self, ids: Vec<u64>) -> Result<Vec<ClipboardExportRecord>> {
+        self.request(|response| DbCommand::ExportRecords(ids, response))
+            .await
+    }
+
+    async fn validate_export(&self, versions: Vec<(u64, String)>) -> Result<bool> {
+        self.request(|response| DbCommand::ValidateExport(versions, response))
+            .await
+    }
+
     async fn safe_html_preview(&self, id: u64) -> Result<Option<String>> {
         let Some(html) = self
             .request(|response| DbCommand::HtmlPayload(id, response))

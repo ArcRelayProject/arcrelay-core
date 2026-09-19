@@ -21,11 +21,11 @@ use crate::domain::clipboard::{
 };
 
 use crate::domain::clipboard::{
-    ClipboardCaptureEvent, ClipboardCaptureOrigin, ClipboardContentKind, ClipboardImageOcr,
-    ClipboardLabel, ClipboardPage, ClipboardPasteMode, ClipboardPayload, ClipboardPolicy,
-    ClipboardQuery, ClipboardRepository, ClipboardSummary, ClipboardSyncChangeKind,
-    ClipboardSyncPage, ClipboardSyncRecord, ClipboardTextSyntax, ClipboardTimelinePage,
-    ClipboardTimelineQuery,
+    ClipboardCaptureEvent, ClipboardCaptureOrigin, ClipboardContentKind, ClipboardExportRecord,
+    ClipboardImageOcr, ClipboardLabel, ClipboardPage, ClipboardPasteMode, ClipboardPayload,
+    ClipboardPolicy, ClipboardQuery, ClipboardRepository, ClipboardSummary,
+    ClipboardSyncChangeKind, ClipboardSyncPage, ClipboardSyncRecord, ClipboardTextSyntax,
+    ClipboardTimelinePage, ClipboardTimelineQuery,
 };
 use crate::domain::clipboard_text::{convert_payload, detect_text_syntax};
 use crate::domain::window_manager::WindowManagerRepository;
@@ -146,6 +146,8 @@ enum DbCommand {
     StoreImageOcrFailure(u64, String, String, DbResponse<()>),
     FilePaths(u64, DbResponse<Vec<String>>),
     TextContent(u64, DbResponse<String>),
+    ExportRecords(Vec<u64>, DbResponse<Vec<ClipboardExportRecord>>),
+    ValidateExport(Vec<(u64, String)>, DbResponse<bool>),
     HtmlPayload(u64, DbResponse<Option<String>>),
     Policy(DbResponse<ClipboardPolicy>),
     Store {

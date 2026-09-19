@@ -317,6 +317,19 @@ pub enum ClipboardPayload {
     Files(Vec<String>),
 }
 
+/// A host-only, read-only snapshot for an explicit local export. It is never
+/// serialized into history summaries or the device protocol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardExportRecord {
+    pub id: u64,
+    pub content_hash: String,
+    pub sensitive: bool,
+    pub payload: ClipboardPayload,
+}
+
+pub const CLIPBOARD_EXPORT_MAX_RECORDS: usize = 128;
+pub const CLIPBOARD_EXPORT_MAX_BYTES: u64 = 128 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipboardOcrPoint {
@@ -423,6 +436,23 @@ pub trait ClipboardRepository: Send + Sync {
     /// representation. Summary previews are intentionally bounded and must
     /// never be used as a content source.
     async fn text_content(&self, id: u64) -> crate::error::Result<String>;
+
+    /// Reads a bounded batch in a single snapshot without restoring the system
+    /// clipboard, updating usage timestamps, or emitting capture/sync events.
+    /// File paths are returned as stored; consumers validate them off the DB thread.
+    async fn export_records(
+        &self,
+        _ids: Vec<u64>,
+    ) -> crate::error::Result<Vec<ClipboardExportRecord>> {
+        Err(crate::error::Error::Clipboard(
+            "clipboard export is unavailable".into(),
+        ))
+    }
+
+    /// Revalidates prepared content without loading its payload a second time.
+    async fn validate_export(&self, _versions: Vec<(u64, String)>) -> crate::error::Result<bool> {
+        Ok(false)
+    }
 
     /// Complete source is local-host-only and must be displayed as escaped text.
     async fn text_preview(
