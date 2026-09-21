@@ -211,8 +211,10 @@ fn snapshot_items(items: &[Retained<NSPasteboardItem>]) -> Result<Vec<ExpectedIt
 
 // changeCount advances when ownership is acquired, before the representations
 // are written. A changed count alone is therefore not a readiness signal.
-// Read back every item/type, including all bytes of large images and HTML,
-// before permitting the caller to post Cmd+V. Never retry the write itself.
+// Read back every representation of the first item, including all bytes of
+// large images and HTML, before permitting the caller to post Cmd+V. For
+// multi-file writes, writeObjects is synchronous and the item count confirms
+// that the complete batch was accepted. Never retry the write itself.
 fn confirm_write(board: &NSPasteboard, generation: isize, expected: &[ExpectedItem]) -> Result<()> {
     let started = Instant::now();
     loop {
@@ -249,16 +251,20 @@ fn write_is_visible(
         }
     };
     unchanged()?;
-    let complete = board.pasteboardItems().is_some_and(|actual| {
-        actual.len() == expected.len()
-            && actual.iter().zip(expected).all(|(actual, expected)| {
-                expected.iter().all(|(kind, expected)| {
-                    actual
-                        .dataForType(kind)
-                        .is_some_and(|actual| actual.isEqualToData(expected))
-                })
+    // NSPasteboardItem is only valid until the pasteboard owner changes. An
+    // external copy or Handoff update can therefore invalidate an item after
+    // the changeCount check but before dataForType, and macOS 15 may crash in
+    // AppKit instead of returning nil. Only use the item array for its stable
+    // count and ask NSPasteboard itself for the current first item's data.
+    let actual_count = board.pasteboardItems().map_or(0, |actual| actual.len());
+    let complete = actual_count == expected.len()
+        && expected.first().is_some_and(|expected| {
+            expected.iter().all(|(kind, expected)| {
+                board
+                    .dataForType(kind)
+                    .is_some_and(|actual| actual.isEqualToData(expected))
             })
-    });
+        });
     unchanged()?;
     Ok(complete)
 }
