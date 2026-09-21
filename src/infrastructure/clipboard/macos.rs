@@ -284,7 +284,7 @@ mod tests {
                 image::RgbaImage::from_pixel(2, 2, image::Rgba([50, 100, 150, 128]))
                     .write_to(&mut png, image::ImageFormat::Png)
                     .unwrap();
-                let (payload, encoded) = prepare_encoded_image(
+                let prepared = prepare_encoded_image(
                     ClipboardPayload::Image {
                         png: png.into_inner(),
                         width: 2,
@@ -293,10 +293,15 @@ mod tests {
                     mode,
                 )
                 .unwrap();
-                let encoded = encoded.unwrap();
-                let expected = encoded.bytes.clone();
+                let expected = prepared.encoded.bytes.clone();
                 let board = NSPasteboard::pasteboardWithUniqueName();
-                write_to_as_image(&board, payload, true, Some(encoded)).unwrap();
+                write_to_as_image(
+                    &board,
+                    prepared.clipboard_payload,
+                    true,
+                    Some(prepared.encoded),
+                )
+                .unwrap();
                 assert_eq!(
                     board
                         .dataForType(&NSString::from_str(kind))

@@ -5,12 +5,19 @@ pub(super) struct EncodedClipboardImage {
     pub bytes: Vec<u8>,
 }
 
-// History and replication stay PNG-only; the requested encoding is a native
-// clipboard representation, not a change to the shared payload schema.
+pub(super) struct PreparedEncodedImage {
+    pub clipboard_payload: ClipboardPayload,
+    pub history_payload: ClipboardPayload,
+    pub encoded: EncodedClipboardImage,
+}
+
+// History and replication retain the selected record; the requested encoding
+// is a one-shot native clipboard representation. In particular, the PNG made
+// from decoded JPEG pixels must not become a second history record.
 pub(super) fn prepare_encoded_image(
     payload: ClipboardPayload,
     mode: ClipboardPasteMode,
-) -> Result<(ClipboardPayload, Option<EncodedClipboardImage>)> {
+) -> Result<PreparedEncodedImage> {
     let ClipboardPayload::Image { ref png, .. } = payload else {
         return Err(Error::Clipboard(
             "this paste format is only available for image records".into(),
@@ -48,7 +55,11 @@ pub(super) fn prepare_encoded_image(
         .into_rgba8();
     if mode == ClipboardPasteMode::ImagePng {
         let bytes = png.clone();
-        return Ok((payload, Some(EncodedClipboardImage { mode, bytes })));
+        return Ok(PreparedEncodedImage {
+            clipboard_payload: payload.clone(),
+            history_payload: payload,
+            encoded: EncodedClipboardImage { mode, bytes },
+        });
     }
     let (width, height) = rgba.dimensions();
     let rgb = image::RgbImage::from_fn(width, height, |x, y| {
@@ -72,14 +83,15 @@ pub(super) fn prepare_encoded_image(
     decoded
         .write_to(&mut canonical_png, image::ImageFormat::Png)
         .map_err(|error| Error::Clipboard(format!("normalize JPG: {error}")))?;
-    Ok((
-        ClipboardPayload::Image {
+    Ok(PreparedEncodedImage {
+        clipboard_payload: ClipboardPayload::Image {
             png: canonical_png.into_inner(),
             width,
             height,
         },
-        Some(EncodedClipboardImage { mode, bytes }),
-    ))
+        history_payload: payload,
+        encoded: EncodedClipboardImage { mode, bytes },
+    })
 }
 
 pub(super) fn write_encoded_image(
@@ -166,10 +178,11 @@ mod image_paste_tests {
     #[test]
     fn png_paste_preserves_bytes_dimensions_and_transparency() {
         let original = source([120, 60, 0, 128]);
-        let (payload, encoded) =
+        let prepared =
             prepare_encoded_image(original.clone(), ClipboardPasteMode::ImagePng).unwrap();
-        assert_eq!(payload, original);
-        let encoded = encoded.unwrap();
+        assert_eq!(prepared.clipboard_payload, original);
+        assert_eq!(prepared.history_payload, original);
+        let encoded = prepared.encoded;
         assert_eq!(
             image::guess_format(&encoded.bytes).unwrap(),
             image::ImageFormat::Png
@@ -189,9 +202,9 @@ mod image_paste_tests {
             ([40, 80, 120, 255], [40, 80, 120]),
         ] {
             let original = source(pixel);
-            let (payload, encoded) =
+            let prepared =
                 prepare_encoded_image(original.clone(), ClipboardPasteMode::ImageJpg).unwrap();
-            let encoded = encoded.unwrap();
+            let encoded = prepared.encoded;
             assert_eq!(
                 image::guess_format(&encoded.bytes).unwrap(),
                 image::ImageFormat::Jpeg
@@ -201,10 +214,11 @@ mod image_paste_tests {
             for (actual, expected) in image.get_pixel(0, 0).0.into_iter().zip(expected) {
                 assert!(actual.abs_diff(expected) <= 3);
             }
-            let ClipboardPayload::Image { png, .. } = payload else {
+            let ClipboardPayload::Image { png, .. } = prepared.clipboard_payload else {
                 panic!("expected image");
             };
             assert_eq!(image::load_from_memory(&png).unwrap().into_rgb8(), image);
+            assert_eq!(prepared.history_payload, original);
             assert_eq!(
                 original,
                 source(pixel),
