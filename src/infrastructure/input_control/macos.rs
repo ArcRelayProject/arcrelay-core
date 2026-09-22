@@ -728,6 +728,35 @@ impl NativeInputControl {
         );
         Ok(())
     }
+
+    fn type_text_as_keys_sync(state: &Mutex<InputState>, text: &str) -> Result<()> {
+        let strokes = crate::domain::input_control::simulated_key_strokes(text)
+            .map_err(|error| Error::InputControl(error.into()))?;
+        let mut state = state
+            .lock()
+            .map_err(|_| Error::InputControl("input state lock poisoned".into()))?;
+
+        Self::release_state(&mut state)?;
+        for stroke in strokes {
+            let result = (|| {
+                if stroke.shift {
+                    Self::set_key(&mut state, 0xE1, true)?;
+                }
+                Self::set_key(&mut state, stroke.hid_usage, true)?;
+                Self::set_key(&mut state, stroke.hid_usage, false)?;
+                if stroke.shift {
+                    Self::set_key(&mut state, 0xE1, false)?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                let _ = Self::release_state(&mut state);
+                return Err(error);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Self::release_state(&mut state)
+    }
 }
 
 impl Drop for NativeInputControl {
@@ -812,6 +841,25 @@ impl InputControlRepository for NativeInputControl {
         );
         self.input_queue
             .exec_sync(|| Self::paste_clipboard_sync(self.state.as_ref(), target_pid))
+    }
+
+    async fn type_text_as_keys(&self, text: &str) -> Result<()> {
+        if !self.permission_granted(false)? {
+            return Err(Error::InputControl(
+                "macOS Accessibility permission is required".into(),
+            ));
+        }
+        let started = Instant::now();
+        while physical_shortcut_modifiers() != 0 {
+            if started.elapsed() >= Duration::from_millis(500) {
+                return Err(Error::InputControl(
+                    "release shortcut modifier keys and try again".into(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        self.input_queue
+            .exec_sync(|| Self::type_text_as_keys_sync(self.state.as_ref(), text))
     }
 
     async fn release_all(&self) -> Result<()> {

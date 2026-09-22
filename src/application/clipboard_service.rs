@@ -392,6 +392,13 @@ impl ClipboardApplicationService {
             ))
             .await
     }
+
+    /// Type already-resolved clipboard text as physical keyboard events. The
+    /// caller owns target-window preparation because desktop UI surfaces must
+    /// restore focus before injection starts.
+    pub async fn type_text_as_keys(&self, text: &str) -> Result<()> {
+        self.input.type_text_as_keys(text).await
+    }
 }
 
 fn is_device_syncable_kind(kind: ClipboardContentKind) -> bool {

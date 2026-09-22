@@ -1,5 +1,6 @@
 pub use arcrelay_input::{
-    SystemGestureEvent, SystemGestureSequence, SYSTEM_GESTURE_FORMAT_VERSION,
+    simulated_key_strokes, SimulatedKeyStroke, SystemGestureEvent, SystemGestureSequence,
+    MAX_SIMULATED_KEYBOARD_TEXT_CHARS, SYSTEM_GESTURE_FORMAT_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -79,6 +80,11 @@ pub trait InputControlRepository: Send + Sync {
     /// implementations keep the modifier/key sequence together and may choose
     /// a text-specific shortcut when the platform benefits from it.
     async fn paste_clipboard(&self, is_text: bool) -> crate::error::Result<()>;
+
+    /// Type printable ASCII as physical key presses without touching the
+    /// system clipboard. Native implementations keep the sequence serialized
+    /// and pace characters for nested remote-desktop/KVM targets.
+    async fn type_text_as_keys(&self, text: &str) -> crate::error::Result<()>;
 
     async fn release_all(&self) -> crate::error::Result<()>;
 }

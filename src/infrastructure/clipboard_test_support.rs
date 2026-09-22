@@ -277,6 +277,9 @@ impl InputControlRepository for NoInput {
     async fn paste_clipboard(&self, _: bool) -> Result<()> {
         unreachable!("test must not use native input")
     }
+    async fn type_text_as_keys(&self, _: &str) -> Result<()> {
+        unreachable!("test must not use native input")
+    }
     async fn release_all(&self) -> Result<()> {
         Ok(())
     }

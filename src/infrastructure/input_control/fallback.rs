@@ -25,6 +25,9 @@ impl InputControlRepository for NativeInputControl {
     async fn paste_clipboard(&self, _is_text: bool) -> Result<()> {
         Err(Error::NotSupported("clipboard paste".into()))
     }
+    async fn type_text_as_keys(&self, _text: &str) -> Result<()> {
+        Err(Error::NotSupported("simulated keyboard input".into()))
+    }
     async fn release_all(&self) -> Result<()> {
         Ok(())
     }

@@ -277,6 +277,37 @@ impl NativeInputControl {
         }
         paste_result.and(release_result)
     }
+
+    fn type_text_as_keys_sync(&self, text: &str) -> Result<()> {
+        let strokes = crate::domain::input_control::simulated_key_strokes(text)
+            .map_err(|error| Error::InputControl(error.into()))?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| Error::InputControl("input state lock poisoned".into()))?;
+
+        Self::release_state(&mut state);
+        for stroke in strokes {
+            let result = (|| {
+                if stroke.shift {
+                    Self::set_key(&mut state, 0xE1, true)?;
+                }
+                Self::set_key(&mut state, stroke.hid_usage, true)?;
+                Self::set_key(&mut state, stroke.hid_usage, false)?;
+                if stroke.shift {
+                    Self::set_key(&mut state, 0xE1, false)?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                Self::release_state(&mut state);
+                return Err(error);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        Self::release_state(&mut state);
+        Ok(())
+    }
 }
 
 impl Drop for NativeInputControl {
@@ -309,6 +340,10 @@ impl InputControlRepository for NativeInputControl {
 
     async fn paste_clipboard(&self, is_text: bool) -> Result<()> {
         self.paste_clipboard_sync(is_text)
+    }
+
+    async fn type_text_as_keys(&self, text: &str) -> Result<()> {
+        self.type_text_as_keys_sync(text)
     }
 
     async fn release_all(&self) -> Result<()> {
