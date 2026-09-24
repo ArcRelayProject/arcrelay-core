@@ -1,10 +1,7 @@
 //! Native writes carry an origin marker in the same pasteboard item as the
 //! content. Received sync writes are host-only, so Handoff cannot echo them.
 use super::*;
-use objc2::{
-    rc::{autoreleasepool, Retained},
-    runtime::ProtocolObject,
-};
+use objc2::{rc::autoreleasepool, runtime::ProtocolObject};
 use objc2_app_kit::{
     NSPasteboard, NSPasteboardContentsOptions, NSPasteboardItem, NSPasteboardTypeFileURL,
     NSPasteboardTypeHTML, NSPasteboardTypePNG, NSPasteboardTypeRTF, NSPasteboardTypeString,
@@ -161,7 +158,6 @@ fn write_to_as_image(
             return Err(Error::Clipboard("prepare clipboard origin failed".into()));
         }
     }
-    let expected = snapshot_items(&items)?;
     let objects = NSArray::from_retained_slice(
         &items
             .iter()
@@ -179,94 +175,13 @@ fn write_to_as_image(
     if !board.writeObjects(&objects) {
         return Err(Error::Clipboard("write clipboard objects failed".into()));
     }
-    // AppKit can advance the change count once more while committing objects,
-    // especially when replacing file URLs with host-only image data. Snapshot
-    // the final generation after the successful write; the byte-for-byte item
-    // check below still rejects an intervening external writer.
-    let generation = board.changeCount();
-    confirm_write(board, generation, &expected)
-}
-
-type ExpectedItem = Vec<(Retained<NSString>, Retained<NSData>)>;
-
-fn snapshot_items(items: &[Retained<NSPasteboardItem>]) -> Result<Vec<ExpectedItem>> {
-    // NSPasteboardItem can become bound to the server after writeObjects. Save
-    // immutable representations now; re-reading the original item afterwards
-    // can return an intervening writer's data and falsely validate it.
-    items
-        .iter()
-        .map(|item| {
-            item.types()
-                .iter()
-                .map(|kind| {
-                    let data = item.dataForType(&kind).ok_or_else(|| {
-                        Error::Clipboard("clipboard representation is not readable".into())
-                    })?;
-                    Ok((kind, data))
-                })
-                .collect()
-        })
-        .collect()
-}
-
-// changeCount advances when ownership is acquired, before the representations
-// are written. A changed count alone is therefore not a readiness signal.
-// Read back every representation of the first item, including all bytes of
-// large images and HTML, before permitting the caller to post Cmd+V. For
-// multi-file writes, writeObjects is synchronous and the item count confirms
-// that the complete batch was accepted. Never retry the write itself.
-fn confirm_write(board: &NSPasteboard, generation: isize, expected: &[ExpectedItem]) -> Result<()> {
-    let started = Instant::now();
-    loop {
-        let complete = write_is_visible(board, generation, expected)?;
-        if complete {
-            tracing::debug!(
-                generation,
-                wait_ms = started.elapsed().as_millis() as u64,
-                "macOS clipboard write verified"
-            );
-            return Ok(());
-        }
-        if started.elapsed() >= Duration::from_secs(2) {
-            return Err(Error::Clipboard(
-                "clipboard content did not become readable; paste cancelled".into(),
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn write_is_visible(
-    board: &NSPasteboard,
-    generation: isize,
-    expected: &[ExpectedItem],
-) -> Result<bool> {
-    let unchanged = || {
-        if board.changeCount() == generation {
-            Ok(())
-        } else {
-            Err(Error::Clipboard(
-                "clipboard changed during write; paste cancelled".into(),
-            ))
-        }
-    };
-    unchanged()?;
-    // NSPasteboardItem is only valid until the pasteboard owner changes. An
-    // external copy or Handoff update can therefore invalidate an item after
-    // the changeCount check but before dataForType, and macOS 15 may crash in
-    // AppKit instead of returning nil. Only use the item array for its stable
-    // count and ask NSPasteboard itself for the current first item's data.
-    let actual_count = board.pasteboardItems().map_or(0, |actual| actual.len());
-    let complete = actual_count == expected.len()
-        && expected.first().is_some_and(|expected| {
-            expected.iter().all(|(kind, expected)| {
-                board
-                    .dataForType(kind)
-                    .is_some_and(|actual| actual.isEqualToData(expected))
-            })
-        });
-    unchanged()?;
-    Ok(complete)
+    // All representations were supplied on owned NSPasteboardItems before
+    // writeObjects. AppKit reports whether it accepted the complete array.
+    // Reading it back here is unsafe: another process (including Handoff) can
+    // replace the pasteboard while AppKit updates its type cache, and macOS 15
+    // has crashed inside dataForType instead of returning nil. Paste callers
+    // still check changeCount before posting the shortcut.
+    Ok(())
 }
 
 #[cfg(test)]
@@ -317,29 +232,34 @@ mod tests {
     }
 
     #[test]
-    fn readiness_requires_all_bytes_and_rejects_replaced_clipboard() {
+    fn large_html_write_keeps_plain_text_fallback() {
         autoreleasepool(|_| {
             let board = NSPasteboard::pasteboardWithUniqueName();
-            let item = NSPasteboardItem::new();
             let html = format!("<p>{}</p>", "大数据🙂".repeat(300_000));
-            item.setString_forType(&NSString::from_str(&html), unsafe { NSPasteboardTypeHTML });
-            item.setString_forType(&NSString::from_str("fallback"), unsafe {
-                NSPasteboardTypeString
-            });
-            let expected = snapshot_items(std::slice::from_ref(&item)).unwrap();
-            let generation = board.clearContents();
-            assert!(!write_is_visible(&board, generation, &expected).unwrap());
-            assert!(board.writeObjects(&NSArray::from_retained_slice(&[
-                ProtocolObject::from_retained(item.clone()),
-            ])));
-            confirm_write(&board, generation, &expected).unwrap();
-            // A readable, same-generation but truncated representation is not ready.
-            board.setString_forType(&NSString::from_str("<p>partial</p>"), unsafe {
-                NSPasteboardTypeHTML
-            });
-            assert!(!write_is_visible(&board, generation, &expected).unwrap());
-            board.clearContents();
-            assert!(write_is_visible(&board, generation, &expected).is_err());
+            write_to(
+                &board,
+                ClipboardPayload::RichText {
+                    html: html.clone(),
+                    plain_text: "fallback".into(),
+                    rtf: None,
+                },
+                false,
+            )
+            .unwrap();
+            assert_eq!(
+                board
+                    .dataForType(unsafe { NSPasteboardTypeHTML })
+                    .unwrap()
+                    .to_vec(),
+                html.as_bytes()
+            );
+            assert_eq!(
+                board
+                    .stringForType(unsafe { NSPasteboardTypeString })
+                    .unwrap()
+                    .to_string(),
+                "fallback"
+            );
             board.clearContents();
         });
     }
