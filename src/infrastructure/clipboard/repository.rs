@@ -447,6 +447,67 @@ impl ClipboardRepository for NativeClipboard {
         Ok(changed)
     }
 
+    async fn save_edited(
+        &self,
+        session: String,
+        source_id: u64,
+        payload: ClipboardPayload,
+    ) -> Result<u64> {
+        uuid::Uuid::parse_str(&session)
+            .map_err(|_| Error::Clipboard("invalid edit session".into()))?;
+        match &payload {
+            ClipboardPayload::Text(text) if !text.is_empty() && text.len() <= 1024 * 1024 => {}
+            ClipboardPayload::Image { png, width, height }
+                if !png.is_empty()
+                    && png.len() <= MAX_CAPTURED_IMAGE_BYTES
+                    && *width > 0
+                    && *height > 0
+                    && u64::from(*width) * u64::from(*height) <= 32 * 1024 * 1024 => {}
+            _ => {
+                return Err(Error::Clipboard(
+                    "edited content is empty, unsupported or too large".into(),
+                ))
+            }
+        }
+        let hash = content_hash(&payload);
+        let summary = summarize(&payload, Some("ArcRelay".into()));
+        let (id, record) = self
+            .request(|response| DbCommand::SaveEdited {
+                session,
+                source_id,
+                payload,
+                hash,
+                summary,
+                device: self.local_device_id.clone(),
+                name: self.local_device_name.clone(),
+                response,
+            })
+            .await?;
+        let _ = self.sync_tx.send(record);
+        Ok(id)
+    }
+
+    async fn copy_edited(&self, id: u64) -> Result<()> {
+        if self.edit_origins(vec![id]).await?.is_empty() {
+            return Err(Error::Clipboard("edited record is unavailable".into()));
+        }
+        let mut records = self.export_records(vec![id]).await?;
+        let payload = records.remove(0).payload;
+        let fingerprints = clipboard_fingerprints(&payload);
+        self.write_system_clipboard(payload, true)?;
+        let record = self
+            .request(|response| DbCommand::SelectEdited(id, self.local_device_id.clone(), response))
+            .await?;
+        self.commit_system_selection(&record, &fingerprints)?;
+        let _ = self.sync_tx.send(record);
+        Ok(())
+    }
+
+    async fn edit_origins(&self, ids: Vec<u64>) -> Result<Vec<(u64, u64)>> {
+        self.request(|response| DbCommand::EditOrigins(ids, response))
+            .await
+    }
+
     async fn edit_text(&self, id: u64, content: &str) -> Result<()> {
         if content.is_empty() || content.len() > 1024 * 1024 {
             return Err(Error::Clipboard(

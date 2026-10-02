@@ -1,3 +1,4 @@
+mod editor;
 mod entity;
 mod export;
 mod migration;

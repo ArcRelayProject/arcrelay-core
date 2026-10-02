@@ -14,7 +14,7 @@ fn detect_format(source: &str, is_html: bool) -> ClipboardTextFormat {
     }
 }
 
-pub(super) fn build_preview(
+pub fn build_preview(
     source: String,
     is_html: bool,
     format: Option<ClipboardTextFormat>,
@@ -30,7 +30,8 @@ pub(super) fn build_preview(
             ClipboardTextFormat::Html => clean_html_fragment(&source),
             ClipboardTextFormat::Markdown => {
                 let options = pulldown_cmark::Options::ENABLE_TABLES
-                    | pulldown_cmark::Options::ENABLE_STRIKETHROUGH;
+                    | pulldown_cmark::Options::ENABLE_STRIKETHROUGH
+                    | pulldown_cmark::Options::ENABLE_TASKLISTS;
                 let mut html = String::new();
                 pulldown_cmark::html::push_html(
                     &mut html,

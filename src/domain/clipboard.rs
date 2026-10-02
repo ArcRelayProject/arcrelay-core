@@ -376,6 +376,29 @@ pub struct ClipboardImageOcr {
 
 #[async_trait::async_trait]
 pub trait ClipboardRepository: Send + Sync {
+    /// Commits an isolated draft once, preserving its source record. Never writes the clipboard.
+    async fn save_edited(
+        &self,
+        _session: String,
+        _source_id: u64,
+        _payload: ClipboardPayload,
+    ) -> crate::error::Result<u64> {
+        Err(crate::error::Error::Clipboard(
+            "clipboard editing is unavailable".into(),
+        ))
+    }
+
+    /// Copies exactly the committed record without creating another history entry.
+    async fn copy_edited(&self, _id: u64) -> crate::error::Result<()> {
+        Err(crate::error::Error::Clipboard(
+            "clipboard editing is unavailable".into(),
+        ))
+    }
+
+    async fn edit_origins(&self, _ids: Vec<u64>) -> crate::error::Result<Vec<(u64, u64)>> {
+        Ok(Vec::new())
+    }
+
     async fn shutdown(&self) {}
 
     /// Subscribe to native clipboard/history changes when the platform backend

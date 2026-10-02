@@ -1592,3 +1592,235 @@ async fn local_file_byte_budget_does_not_reduce_shared_content_capacity() {
         assert!(bytes <= limit);
     }
 }
+
+#[tokio::test]
+async fn editor_commit_preserves_original_and_retries_without_changing_selection() {
+    let store = SqliteClipboardStore::connect(None).await.unwrap();
+    let text = "same content  \n\n";
+    let source = store
+        .store(
+            ClipboardPayload::Text(text.into()),
+            "same-hash".into(),
+            summary(ClipboardContentKind::Text, text),
+            true,
+            "local",
+            "Local",
+            true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let source_id = store
+        .history(ClipboardQuery::recent(100))
+        .await
+        .unwrap()
+        .entries[0]
+        .id;
+    let before = store.export_records(vec![source_id]).await.unwrap();
+    let session = uuid::Uuid::new_v4().to_string();
+    let (id, saved) = store
+        .save_edited(
+            &session,
+            source_id,
+            ClipboardPayload::Text(text.into()),
+            "same-hash".into(),
+            summary(ClipboardContentKind::Text, text),
+            "local",
+            "Local",
+        )
+        .await
+        .unwrap();
+    assert_ne!(id, source_id);
+    assert_ne!(saved.sync_id, source.sync_id);
+    assert!(!saved.live);
+    assert_eq!(saved.text.as_deref(), Some(text));
+    assert_eq!(
+        store.replica_selection().await.unwrap().unwrap().sync_id,
+        source.sync_id
+    );
+    assert_eq!(
+        store.export_records(vec![source_id]).await.unwrap()[0].payload,
+        before[0].payload
+    );
+    assert_eq!(
+        store.edit_origins(vec![id, source_id]).await.unwrap(),
+        vec![(id, source_id)]
+    );
+    let retry = store
+        .save_edited(
+            &session,
+            source_id,
+            ClipboardPayload::Text(text.into()),
+            "same-hash".into(),
+            summary(ClipboardContentKind::Text, text),
+            "local",
+            "Local",
+        )
+        .await
+        .unwrap();
+    assert_eq!(retry.0, id);
+    assert_eq!(
+        store
+            .history(ClipboardQuery::recent(100))
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        2
+    );
+    assert!(store
+        .save_edited(
+            &session,
+            source_id,
+            ClipboardPayload::Text("changed".into()),
+            "different-hash".into(),
+            summary(ClipboardContentKind::Text, "changed"),
+            "local",
+            "Local"
+        )
+        .await
+        .is_err());
+    for _ in 0..2 {
+        assert_eq!(
+            store.select_edited(id, "local").await.unwrap().sync_id,
+            saved.sync_id
+        );
+    }
+    assert_eq!(
+        store
+            .history(ClipboardQuery::recent(100))
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        2
+    );
+    assert_eq!(
+        store.replica_selection().await.unwrap().unwrap().sync_id,
+        saved.sync_id
+    );
+}
+
+#[tokio::test]
+async fn editor_commit_rejects_policy_changes_and_deleted_sources() {
+    let store = SqliteClipboardStore::connect(None).await.unwrap();
+    store
+        .store(
+            ClipboardPayload::Text("original".into()),
+            "original".into(),
+            summary(ClipboardContentKind::Text, "original"),
+            true,
+            "local",
+            "Local",
+            true,
+        )
+        .await
+        .unwrap();
+    let id = store
+        .history(ClipboardQuery::recent(100))
+        .await
+        .unwrap()
+        .entries[0]
+        .id;
+    let mut policy = store.policy().await.unwrap();
+    policy.history_enabled = false;
+    store.update_policy(policy.clone()).await.unwrap();
+    assert!(store
+        .save_edited(
+            "session",
+            id,
+            ClipboardPayload::Text("draft".into()),
+            "draft".into(),
+            summary(ClipboardContentKind::Text, "draft"),
+            "local",
+            "Local"
+        )
+        .await
+        .is_err());
+    policy.history_enabled = true;
+    store.update_policy(policy).await.unwrap();
+    store.delete(id, "local").await.unwrap();
+    assert!(store
+        .save_edited(
+            "session",
+            id,
+            ClipboardPayload::Text("draft".into()),
+            "draft".into(),
+            summary(ClipboardContentKind::Text, "draft"),
+            "local",
+            "Local"
+        )
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn editor_image_commit_does_not_inherit_source_ocr() {
+    let store = SqliteClipboardStore::connect(None).await.unwrap();
+    let mut source_summary = summary(ClipboardContentKind::Image, "image");
+    source_summary.width = Some(1);
+    source_summary.height = Some(1);
+    let source = store
+        .store(
+            ClipboardPayload::Image {
+                png: vec![1],
+                width: 1,
+                height: 1,
+            },
+            "image-source".into(),
+            source_summary.clone(),
+            true,
+            "local",
+            "Local",
+            true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let source_id = store
+        .ensure_image_ocr_pending(&source.sync_id, "test", false)
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .save_image_ocr(
+            source_id,
+            ClipboardImageOcr {
+                text: "hidden source text".into(),
+                blocks: vec![],
+                model_version: "test".into(),
+                updated_at_ms: 1,
+            },
+        )
+        .await
+        .unwrap();
+    let (id, record) = store
+        .save_edited(
+            "image-session",
+            source_id,
+            ClipboardPayload::Image {
+                png: vec![2],
+                width: 1,
+                height: 1,
+            },
+            "edited-image".into(),
+            source_summary,
+            "local",
+            "Local",
+        )
+        .await
+        .unwrap();
+    assert_ne!(id, source_id);
+    assert!(store.image_ocr(id).await.unwrap().is_none());
+    assert_eq!(
+        store.image_ocr(source_id).await.unwrap().unwrap().text,
+        "hidden source text"
+    );
+    assert_eq!(
+        store
+            .ensure_image_ocr_pending(&record.sync_id, "test", false)
+            .await
+            .unwrap(),
+        Some(id)
+    );
+}
