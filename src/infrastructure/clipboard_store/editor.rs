@@ -77,24 +77,9 @@ impl SqliteClipboardStore {
             .storage_bytes()
             .saturating_add(byte_len(&hash))
             .saturating_add(byte_len(&summary.preview))
+            .saturating_add(summary.source_app.as_deref().map_or(0, byte_len))
             .saturating_add(byte_len(&search_text));
-        let usage = transaction
-            .query_one(Statement::from_string(
-                sea_orm::DbBackend::Sqlite,
-                "SELECT item_count, total_bytes FROM clipboard_retention_statistics WHERE scope=1"
-                    .to_owned(),
-            ))
-            .await?
-            .ok_or_else(|| DbErr::Custom("clipboard storage accounting is unavailable".into()))?;
-        let total_bytes = usage.try_get::<i64>("", "total_bytes")?.max(0) as u64;
-        let item_count = usage.try_get::<i64>("", "item_count")?.max(0) as u64;
-        if total_bytes.saturating_add(storage_bytes as u64) > policy.max_bytes
-            || item_count >= u64::from(policy.max_items)
-        {
-            return Err(DbErr::Custom(
-                "clipboard history is full; free space or increase its limit before saving this edit".into(),
-            ));
-        }
+        Self::reserve_edit_space(&transaction, &policy, source_id, storage_bytes).await?;
         let now = Utc::now().timestamp_millis();
         let id = clipboard_entry::ActiveModel {
             id: Default::default(),
@@ -136,9 +121,68 @@ impl SqliteClipboardStore {
             [session.into(), id.into(), source_id.into(), hash.into()],
         )).await?;
         bump_revision(&transaction).await?;
-        // Keep the original throughout this operation; normal retention still applies later.
+        // Space reclamation and the new entry commit together, preserving the original.
         transaction.commit().await?;
         Ok((id as u64, self.edited_sync_record(id as u64).await?))
+    }
+
+    async fn reserve_edit_space<C: ConnectionTrait>(
+        db: &C,
+        policy: &ClipboardPolicy,
+        source_id: i64,
+        storage_bytes: i64,
+    ) -> Result<(), DbErr> {
+        let usage = db
+            .query_one(Statement::from_string(
+                sea_orm::DbBackend::Sqlite,
+                "SELECT item_count, total_bytes FROM clipboard_retention_statistics WHERE scope=1"
+                    .to_owned(),
+            ))
+            .await?
+            .ok_or_else(|| DbErr::Custom("clipboard storage accounting is unavailable".into()))?;
+        let mut bytes = usage.try_get::<i64>("", "total_bytes")?.max(0) as u64;
+        let mut count = usage.try_get::<i64>("", "item_count")?.max(0) as u64;
+        let required = storage_bytes.max(0) as u64;
+        while count >= u64::from(policy.max_items)
+            || bytes.saturating_add(required) > policy.max_bytes
+        {
+            // Match normal retention eligibility, additionally protecting the editor's
+            // source and the current selection. Read metadata in bounded batches;
+            // large image payloads must not be loaded just to reclaim space.
+            let candidates = db
+                .query_all(Statement::from_sql_and_values(
+                    sea_orm::DbBackend::Sqlite,
+                    "SELECT id, storage_bytes FROM clipboard_entries
+                     WHERE deleted=0 AND kind<>4 AND favorite=0 AND id<>?
+                       AND sync_id NOT IN (SELECT entry_sync_id FROM clipboard_entry_labels WHERE attached=1)
+                       AND sync_id NOT IN (SELECT sync_id FROM clipboard_replica_selection WHERE id=1)
+                     ORDER BY captured_at_ms ASC, sync_id ASC LIMIT 128",
+                    [source_id.into()],
+                ))
+                .await?;
+            if candidates.is_empty() || required > policy.max_bytes {
+                return Err(DbErr::Custom(
+                    "剪贴板历史空间不足；保留原记录、收藏、标签及当前条目后无法保存，请清理历史或提高条数和容量上限后重试。草稿仍然保留。".into(),
+                ));
+            }
+            let mut delete_ids = Vec::new();
+            for row in candidates {
+                if count < u64::from(policy.max_items)
+                    && bytes.saturating_add(required) <= policy.max_bytes
+                {
+                    break;
+                }
+                delete_ids.push(row.try_get::<i64>("", "id")?);
+                count = count.saturating_sub(1);
+                bytes =
+                    bytes.saturating_sub(row.try_get::<i64>("", "storage_bytes")?.max(0) as u64);
+            }
+            clipboard_entry::Entity::delete_many()
+                .filter(clipboard_entry::Column::Id.is_in(delete_ids))
+                .exec(db)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn edited_sync_record(&self, id: u64) -> Result<ClipboardSyncRecord, DbErr> {
