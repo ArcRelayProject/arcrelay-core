@@ -427,7 +427,7 @@ impl SqliteClipboardStore {
     pub(super) async fn apply_sync_record_with_timeline(
         &self,
         record: ClipboardSyncRecord,
-        timeline: Option<(i64, u32)>,
+        timeline: Option<(i64, u32, Option<i64>)>,
     ) -> Result<bool, DbErr> {
         let transaction = self.db.begin().await?;
         let mut existing = clipboard_entry::Entity::find()
@@ -476,19 +476,22 @@ impl SqliteClipboardStore {
         let labels_are_newer = self.label_state_is_newer(&transaction, &record).await?;
 
         let mut timeline_changed = false;
-        if let (Some(model), Some((first, count))) = (existing.as_mut(), timeline) {
+        if let (Some(model), Some((first, count, last_used))) = (existing.as_mut(), timeline) {
             let first = model.first_captured_at_ms.min(first);
             let count = model.copy_count.max(count.min(i32::MAX as u32) as i32);
             let captured = model.captured_at_ms.max(record.captured_at_ms);
+            let last_used = model.last_used_at_ms.max(last_used);
             if first != model.first_captured_at_ms
                 || count != model.copy_count
                 || captured != model.captured_at_ms
+                || last_used != model.last_used_at_ms
             {
                 let mut active = model.clone().into_active_model();
                 active.first_captured_at_ms = Set(first);
                 active.copy_count = Set(count);
                 active.captured_at_ms = Set(captured);
-                active.updated_at_ms = Set(captured.max(model.last_used_at_ms.unwrap_or_default()));
+                active.last_used_at_ms = Set(last_used);
+                active.updated_at_ms = Set(captured.max(last_used.unwrap_or_default()));
                 *model = active.update(&transaction).await?;
                 timeline_changed = true;
             }
@@ -539,7 +542,7 @@ impl SqliteClipboardStore {
                         timeline.map_or(record.captured_at_ms, |value| value.0)
                     ),
                     captured_at_ms: Set(record.captured_at_ms),
-                    last_used_at_ms: Set(None),
+                    last_used_at_ms: Set(timeline.and_then(|value| value.2)),
                     updated_at_ms: Set(record.captured_at_ms),
                     copy_count: Set(
                         timeline.map_or(1, |value| value.1.max(1).min(i32::MAX as u32) as i32)
@@ -610,7 +613,7 @@ impl SqliteClipboardStore {
                         timeline.map_or(record.captured_at_ms, |value| value.0)
                     ),
                     captured_at_ms: Set(record.captured_at_ms),
-                    last_used_at_ms: Set(None),
+                    last_used_at_ms: Set(timeline.and_then(|value| value.2)),
                     updated_at_ms: Set(record.captured_at_ms),
                     copy_count: Set(
                         timeline.map_or(1, |value| value.1.max(1).min(i32::MAX as u32) as i32)
@@ -743,7 +746,7 @@ impl SqliteClipboardStore {
                 source_app: Set(summary.source_app),
                 first_captured_at_ms: Set(timeline.map_or(record.captured_at_ms, |value| value.0)),
                 captured_at_ms: Set(record.captured_at_ms),
-                last_used_at_ms: Set(None),
+                last_used_at_ms: Set(timeline.and_then(|value| value.2)),
                 updated_at_ms: Set(record.captured_at_ms),
                 copy_count: Set(
                     timeline.map_or(1, |value| value.1.max(1).min(i32::MAX as u32) as i32)

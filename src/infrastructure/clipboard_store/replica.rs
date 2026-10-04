@@ -130,7 +130,11 @@ impl SqliteClipboardStore {
         self.check_replica_storage(&replica).await?;
         self.apply_sync_record_with_timeline(
             replica.record,
-            Some((replica.first_captured_at_ms, replica.copy_count)),
+            Some((
+                replica.first_captured_at_ms,
+                replica.copy_count,
+                replica.last_used_at_ms,
+            )),
         )
         .await
     }
@@ -145,6 +149,7 @@ fn replica_metadata(
         // capture. Keep exports valid even while a legacy peer is connected.
         first_captured_at_ms: model.first_captured_at_ms.min(model.captured_at_ms),
         copy_count: model.copy_count.max(1) as u32,
+        last_used_at_ms: model.last_used_at_ms,
         record: ClipboardSyncRecord {
             sync_id: model.sync_id.clone(),
             kind: kind_from_i32(model.kind)?,
@@ -305,37 +310,14 @@ impl SqliteClipboardStore {
         }
         let policy = self.policy().await?;
         if policy.retention_days > 0
-            && record.captured_at_ms
+            && record
+                .captured_at_ms
+                .max(replica.last_used_at_ms.unwrap_or_default())
                 < Utc::now().timestamp_millis() - i64::from(policy.retention_days) * 86_400_000
         {
             return Err(DbErr::Custom(
                 "record is outside this device's retention period".into(),
             ));
-        }
-        let totals = self
-            .db
-            .query_one(Statement::from_string(
-                sea_orm::DbBackend::Sqlite,
-                "SELECT item_count, total_bytes FROM clipboard_retention_statistics WHERE scope=1"
-                    .to_owned(),
-            ))
-            .await?
-            .ok_or_else(|| DbErr::Custom("clipboard accounting is missing".into()))?;
-        if totals.try_get::<i64>("", "item_count")? < i64::from(policy.max_items.max(1))
-            && (totals.try_get::<i64>("", "total_bytes")?.max(0) as u64) < policy.max_bytes.max(1)
-        {
-            return Ok(());
-        }
-        let oldest = summary_query().filter(clipboard_entry::Column::Deleted.eq(false))
-            .filter(clipboard_entry::Column::Kind.ne(4))
-            .filter(clipboard_entry::Column::Favorite.eq(false))
-            .filter(Expr::cust("sync_id NOT IN (SELECT entry_sync_id FROM clipboard_entry_labels WHERE attached=1)"))
-            .order_by_asc(clipboard_entry::Column::CapturedAtMs).order_by_asc(clipboard_entry::Column::SyncId)
-            .one(&self.db).await?;
-        if oldest.is_none_or(|oldest| {
-            (record.captured_at_ms, &record.sync_id) <= (oldest.captured_at_ms, &oldest.sync_id)
-        }) {
-            return Err(DbErr::Custom("record is outside this device's retained history window; increase its history limits to include older records".into()));
         }
         Ok(())
     }
@@ -360,7 +342,7 @@ impl SqliteClipboardStore {
                 == 0
         {
             return Err(DbErr::Custom(
-                "clipboard history limits cannot retain this record; increase the history limits"
+                "record is outside this device's idle retention period; extend the retention period or keep history forever"
                     .into(),
             ));
         }

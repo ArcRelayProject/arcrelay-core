@@ -55,6 +55,25 @@ impl ClipboardApplicationService {
         }
     }
 
+    pub async fn save_edited(
+        &self,
+        session: String,
+        source_id: u64,
+        payload: crate::domain::clipboard::ClipboardPayload,
+    ) -> Result<u64> {
+        self.repository
+            .save_edited(session, source_id, payload)
+            .await
+    }
+
+    pub async fn copy_edited(&self, id: u64) -> Result<()> {
+        self.repository.copy_edited(id).await
+    }
+
+    pub async fn edit_origins(&self, ids: Vec<u64>) -> Result<Vec<(u64, u64)>> {
+        self.repository.edit_origins(ids).await
+    }
+
     pub async fn revision(&self) -> Result<u64> {
         self.repository.revision().await
     }

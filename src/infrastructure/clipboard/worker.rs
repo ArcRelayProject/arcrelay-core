@@ -190,6 +190,10 @@ pub(super) fn start_database_worker(
                     } else { tokio::select! { biased;
                         _ = stopping.changed(), if !*stopping.borrow() => { rx.close(); rx.recv().await },
                         command = rx.recv() => command,
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
+                            store.maintenance_pending.store(true, std::sync::atomic::Ordering::Release);
+                            continue;
+                        },
                     } };
                     let Some(command) = command else { break; };
                     handle_database_command(&store, &change_tx, &capture_tx, &ocr_job_tx, command).await;
@@ -315,6 +319,43 @@ pub(super) async fn handle_database_command(
             } else if let Err(error) = result {
                 warn!(%error, "failed to store clipboard history");
             }
+        }
+        DbCommand::SaveEdited {
+            session,
+            source_id,
+            payload,
+            hash,
+            summary,
+            device,
+            name,
+            response,
+        } => {
+            let result = store
+                .save_edited(&session, source_id, payload, hash, summary, &device, &name)
+                .await
+                .map_err(db_error);
+            if let Ok((_, record)) = &result {
+                if record.kind == ClipboardContentKind::Image {
+                    if let Ok(Some(id)) = store
+                        .ensure_image_ocr_pending(&record.sync_id, OCR_MODEL_VERSION, false)
+                        .await
+                    {
+                        let _ = ocr_job_tx.send(Some(OcrJob { id, urgent: false }));
+                    }
+                }
+                let _ = change_tx.send(());
+            }
+            let _ = response.send(result);
+        }
+        DbCommand::EditOrigins(ids, response) => {
+            let _ = response.send(store.edit_origins(ids).await.map_err(db_error));
+        }
+        DbCommand::SelectEdited(id, device, response) => {
+            let result = store.select_edited(id, &device).await.map_err(db_error);
+            if result.is_ok() {
+                let _ = change_tx.send(());
+            }
+            let _ = response.send(result);
         }
         DbCommand::Payload(id, response) => {
             let result = store.payload(id).await.map_err(db_error);

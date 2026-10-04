@@ -130,7 +130,21 @@ struct OcrJob {
     urgent: bool,
 }
 
+pub use text_preview::build_preview as preview_draft;
+
 enum DbCommand {
+    SaveEdited {
+        session: String,
+        source_id: u64,
+        payload: ClipboardPayload,
+        hash: String,
+        summary: ClipboardSummary,
+        device: String,
+        name: String,
+        response: DbResponse<(u64, ClipboardSyncRecord)>,
+    },
+    EditOrigins(Vec<u64>, DbResponse<Vec<(u64, u64)>>),
+    SelectEdited(u64, String, DbResponse<ClipboardSyncRecord>),
     Revision(DbResponse<u64>),
     CurrentSummary(DbResponse<Option<ClipboardSummary>>),
     History(ClipboardQuery, DbResponse<ClipboardPage>),
@@ -213,7 +227,8 @@ impl DbCommand {
     fn read_only(&self) -> bool {
         matches!(
             self,
-            Self::Revision(_)
+            Self::EditOrigins(..)
+                | Self::Revision(_)
                 | Self::CurrentSummary(_)
                 | Self::History(..)
                 | Self::Timeline(..)

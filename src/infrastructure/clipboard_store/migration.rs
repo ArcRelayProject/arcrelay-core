@@ -15,6 +15,8 @@ impl MigratorTrait for Migrator {
             Box::new(super::replica::ReplicaStateMigration),
             Box::new(super::replica::RepairLegacyTimelineMigration),
             Box::new(super::retention::SeparateRetentionAccounting),
+            Box::new(super::editor::EditorMigration),
+            Box::new(super::retention::IdleRetention),
         ]
     }
 }

@@ -65,3 +65,28 @@ impl MigrationTrait for SeparateRetentionAccounting {
             .map(|_| ())
     }
 }
+
+pub(super) struct IdleRetention;
+impl MigrationName for IdleRetention {
+    fn name(&self) -> &str {
+        "m20261004_clipboard_idle_retention"
+    }
+}
+#[async_trait::async_trait]
+impl MigrationTrait for IdleRetention {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager.get_connection().execute_unprepared(
+            "UPDATE clipboard_state SET max_items=0, max_bytes=0, revision=revision+1;
+             CREATE INDEX idx_clipboard_idle_retention ON clipboard_entries(
+                deleted, favorite, MAX(captured_at_ms, COALESCE(last_used_at_ms, captured_at_ms)), sync_id
+             );"
+        ).await.map(|_| ())
+    }
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared("DROP INDEX idx_clipboard_idle_retention")
+            .await
+            .map(|_| ())
+    }
+}
