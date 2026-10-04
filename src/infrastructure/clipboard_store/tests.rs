@@ -275,11 +275,10 @@ async fn interactive_reader_is_independent_of_an_open_write_transaction() {
 }
 
 #[tokio::test]
-async fn retention_commits_bounded_batches_and_accounting_matches_rows() {
+async fn idle_retention_commits_bounded_batches_and_accounting_matches_rows() {
     let store = timeline_fixture(350).await;
     let mut policy = store.policy().await.unwrap();
-    policy.retention_days = 0;
-    policy.max_items = 10;
+    policy.retention_days = 30;
     store.update_policy(policy).await.unwrap();
     let mut previous = SqliteClipboardStore::item_count(&store.db).await.unwrap();
     assert_eq!(previous, 222);
@@ -289,9 +288,9 @@ async fn retention_commits_bounded_batches_and_accounting_matches_rows() {
         assert!(previous - current <= 128);
         previous = current;
     }
-    assert_eq!(previous, 10);
+    assert_eq!(previous, 0);
     let totals = store.db.query_one(Statement::from_string(sea_orm::DbBackend::Sqlite,
-        "SELECT (SELECT total_bytes FROM clipboard_statistics WHERE id=1) = SUM(storage_bytes) AS correct FROM clipboard_entries WHERE deleted=0".to_string())).await.unwrap().unwrap();
+        "SELECT (SELECT total_bytes FROM clipboard_statistics WHERE id=1) = COALESCE(SUM(storage_bytes), 0) AS correct FROM clipboard_entries WHERE deleted=0".to_string())).await.unwrap().unwrap();
     assert_eq!(totals.try_get::<i64>("", "correct").unwrap(), 1);
 }
 
@@ -1133,8 +1132,7 @@ async fn file_retention_counts_the_stored_path_not_the_file_size() {
     let mut file_summary = summary(ClipboardContentKind::Files, "large.iso");
     file_summary.size_bytes = 10 * 1024 * 1024 * 1024;
 
-    let mut policy = store.policy().await.unwrap();
-    policy.max_bytes = 1024;
+    let policy = store.policy().await.unwrap();
     store.update_policy(policy).await.unwrap();
     store
         .store(
@@ -1305,7 +1303,6 @@ async fn performance_clipboard_search_10000() {
         .await
         .unwrap();
     let mut policy = store.policy().await.unwrap();
-    policy.max_items = 10_000;
     policy.retention_days = 0;
     store.update_policy(policy).await.unwrap();
     for i in 0..10_000 {
@@ -1404,11 +1401,10 @@ async fn local_copy_advances_past_an_observed_peer_with_a_faster_clock() {
 }
 
 #[tokio::test]
-async fn local_file_retention_cannot_evict_shared_history_and_remains_bounded() {
+async fn local_file_history_does_not_evict_shared_content() {
     let store = SqliteClipboardStore::connect(None).await.unwrap();
     let mut policy = store.policy().await.unwrap();
     policy.retention_days = 0;
-    policy.max_items = 2;
     store.update_policy(policy).await.unwrap();
     for index in 0..2 {
         store
@@ -1444,14 +1440,14 @@ async fn local_file_retention_cannot_evict_shared_history_and_remains_bounded() 
         shared.records
     );
     let history = store.history(ClipboardQuery::recent(10)).await.unwrap();
-    assert_eq!(history.entries.len(), 4);
+    assert_eq!(history.entries.len(), 6);
     assert_eq!(
         history
             .entries
             .iter()
             .filter(|r| r.kind == ClipboardContentKind::Files)
             .count(),
-        2
+        4
     );
     let totals = store
         .db
@@ -1462,7 +1458,7 @@ async fn local_file_retention_cannot_evict_shared_history_and_remains_bounded() 
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(totals.try_get::<i64>("", "count").unwrap(), 4);
+    assert_eq!(totals.try_get::<i64>("", "count").unwrap(), 6);
     // Deletion and clearing maintain both accounting scopes and the UI total.
     store.delete(history.entries[0].id, "local").await.unwrap();
     store.clear().await.unwrap();
@@ -1512,7 +1508,7 @@ fn retention_scope_migration_preserves_existing_history_without_a_runtime_contex
 }
 
 #[tokio::test]
-async fn local_file_byte_budget_does_not_reduce_shared_content_capacity() {
+async fn local_file_and_shared_byte_accounting_remains_accurate_without_limits() {
     let store = SqliteClipboardStore::connect(None).await.unwrap();
     let text = "x".repeat(60);
     store
@@ -1549,11 +1545,9 @@ async fn local_file_byte_budget_does_not_reduce_shared_content_capacity() {
         .await
         .unwrap()
         .unwrap();
-    let limit = totals.try_get::<i64>("", "bytes").unwrap();
+    let _initial_bytes = totals.try_get::<i64>("", "bytes").unwrap();
     let mut policy = store.policy().await.unwrap();
     policy.retention_days = 0;
-    policy.max_items = 100;
-    policy.max_bytes = limit as u64;
     store.update_policy(policy).await.unwrap();
     for index in 1..4 {
         let path = format!("/{}-{index}", "f".repeat(128));
@@ -1578,7 +1572,7 @@ async fn local_file_byte_budget_does_not_reduce_shared_content_capacity() {
             .unwrap()
             .entries
             .len(),
-        2
+        5
     );
     let totals = store.db.query_all(Statement::from_string(sea_orm::DbBackend::Sqlite,
         "SELECT s.item_count, s.total_bytes, COUNT(e.id) AS actual_count, COALESCE(SUM(e.storage_bytes),0) AS actual_bytes FROM clipboard_retention_statistics s LEFT JOIN clipboard_entries e ON e.deleted=0 AND s.scope=CASE WHEN e.kind=4 THEN 2 ELSE 1 END GROUP BY s.scope ORDER BY s.scope".to_string())).await.unwrap();
@@ -1589,7 +1583,7 @@ async fn local_file_byte_budget_does_not_reduce_shared_content_capacity() {
         );
         let bytes = row.try_get::<i64>("", "total_bytes").unwrap();
         assert_eq!(bytes, row.try_get::<i64>("", "actual_bytes").unwrap());
-        assert!(bytes <= limit);
+        assert!(bytes > 0);
     }
 }
 
@@ -1879,29 +1873,44 @@ async fn editor_test_save(
         .await
 }
 
-async fn editor_test_bytes(store: &SqliteClipboardStore) -> u64 {
+#[tokio::test]
+async fn editor_commit_ignores_legacy_capacity_limits_and_preserves_history() {
+    let store = SqliteClipboardStore::connect(None).await.unwrap();
+    let source = editor_test_image(&store, "source", 100, true).await;
+    let other = editor_test_image(&store, "other", 100, false).await;
     store
         .db
-        .query_one(Statement::from_string(
-            sea_orm::DbBackend::Sqlite,
-            "SELECT total_bytes FROM clipboard_retention_statistics WHERE scope=1".to_owned(),
-        ))
+        .execute_unprepared("UPDATE clipboard_state SET max_items=1, max_bytes=1")
         .await
-        .unwrap()
-        .unwrap()
-        .try_get::<i64>("", "total_bytes")
-        .unwrap() as u64
+        .unwrap();
+    let (saved, _) = editor_test_save(&store, source, 1024).await.unwrap();
+    assert_eq!(
+        editor_test_save(&store, source, 1024).await.unwrap().0,
+        saved
+    );
+    assert_eq!(store.image_png(source).await.unwrap(), Some(vec![1; 100]));
+    assert_eq!(store.image_png(other).await.unwrap(), Some(vec![1; 100]));
+    assert_eq!(
+        store
+            .history(ClipboardQuery::recent(100))
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        3
+    );
 }
 
 #[tokio::test]
-async fn editor_commit_at_item_limit_reclaims_oldest_unprotected_history() {
+async fn retention_uses_last_activity_and_protects_favorites_and_labels() {
     let store = SqliteClipboardStore::connect(None).await.unwrap();
-    let source = editor_test_image(&store, "source", 100, false).await;
-    let oldest = editor_test_image(&store, "oldest", 100, false).await;
-    let newer = editor_test_image(&store, "newer", 100, false).await;
+    let expired = editor_test_image(&store, "expired", 100, false).await;
+    let used = editor_test_image(&store, "used", 100, false).await;
     let favorite = editor_test_image(&store, "favorite", 100, false).await;
-    store.set_favorite(favorite, true, "local").await.unwrap();
     let tagged = editor_test_image(&store, "tagged", 100, false).await;
+    let recopied = editor_test_image(&store, "recopied", 100, false).await;
+    let unused = editor_test_image(&store, "unused", 100, false).await;
+    store.set_favorite(favorite, true, "local").await.unwrap();
     let label = store
         .create_label("Keep", "#112233", "local")
         .await
@@ -1910,196 +1919,169 @@ async fn editor_commit_at_item_limit_reclaims_oldest_unprotected_history() {
         .set_label_membership(tagged, &label.id, true, "local")
         .await
         .unwrap();
-    let current = editor_test_image(&store, "current", 100, true).await;
-    // Deterministic oldest ordering, with the source older than every candidate.
+    let now = Utc::now().timestamp_millis();
+    let day = 86_400_000;
+    store.db.execute(Statement::from_sql_and_values(sea_orm::DbBackend::Sqlite,
+        "UPDATE clipboard_entries SET first_captured_at_ms=?, captured_at_ms=?, updated_at_ms=?",
+        [(now-60*day).into(), (now-40*day).into(), now.into()],
+    )).await.unwrap();
     store
         .db
         .execute(Statement::from_sql_and_values(
             sea_orm::DbBackend::Sqlite,
-            "UPDATE clipboard_entries SET captured_at_ms=?+id",
-            [Utc::now().timestamp_millis().into()],
+            "UPDATE clipboard_entries SET last_used_at_ms=? WHERE id=?",
+            [(now - 15 * day).into(), (used as i64).into()],
         ))
         .await
         .unwrap();
     store
-        .store(
-            ClipboardPayload::Files(vec!["/missing/local-file".into()]),
-            "file".into(),
-            summary(ClipboardContentKind::Files, "file"),
-            true,
-            "local",
-            "Local",
-            false,
-        )
+        .db
+        .execute(Statement::from_sql_and_values(
+            sea_orm::DbBackend::Sqlite,
+            "UPDATE clipboard_entries SET captured_at_ms=?, last_used_at_ms=? WHERE id=?",
+            [
+                (now - 5 * day).into(),
+                (now - 40 * day).into(),
+                (recopied as i64).into(),
+            ],
+        ))
         .await
         .unwrap();
+    store
+        .db
+        .execute(Statement::from_sql_and_values(
+            sea_orm::DbBackend::Sqlite,
+            "UPDATE clipboard_entries SET captured_at_ms=? WHERE id=?",
+            [(now - 29 * day).into(), (unused as i64).into()],
+        ))
+        .await
+        .unwrap();
+    store.maintain().await.unwrap();
+    assert!(store.image_png(expired).await.unwrap().is_none());
+    for id in [used, favorite, tagged, recopied, unused] {
+        assert!(store.image_png(id).await.unwrap().is_some());
+    }
     let mut policy = store.policy().await.unwrap();
-    policy.retention_days = 0;
-    policy.max_items = 6;
+    policy.retention_days = 7;
     store.update_policy(policy).await.unwrap();
-    let before = store
-        .export_records(vec![source, favorite, tagged, current])
+    for id in [used, unused] {
+        assert!(store.image_png(id).await.unwrap().is_none());
+    }
+    for id in [favorite, tagged, recopied] {
+        assert!(store.image_png(id).await.unwrap().is_some());
+    }
+}
+
+#[tokio::test]
+async fn forever_retention_never_prunes_even_with_legacy_limits() {
+    let store = timeline_fixture(600).await;
+    store
+        .db
+        .execute_unprepared("UPDATE clipboard_state SET max_items=1, max_bytes=1")
         .await
         .unwrap();
-    let selection = store.replica_selection().await.unwrap();
-    let (saved, _) = editor_test_save(&store, source, 100).await.unwrap();
-    assert!(store.image_png(oldest).await.unwrap().is_none());
-    assert!(store.image_png(newer).await.unwrap().is_some());
+    let mut policy = store.policy().await.unwrap();
+    policy.retention_days = 0;
+    store.update_policy(policy).await.unwrap();
+    store.maintain().await.unwrap();
     assert_eq!(
-        store
-            .export_records(vec![source, favorite, tagged, current])
-            .await
-            .unwrap(),
-        before
-    );
-    assert_eq!(store.replica_selection().await.unwrap(), selection);
-    let entries = store
-        .history(ClipboardQuery::recent(100))
-        .await
-        .unwrap()
-        .entries;
-    assert_eq!(entries.len(), 7); // Six shared entries and the independent local file.
-    assert!(entries
-        .iter()
-        .any(|entry| entry.kind == ClipboardContentKind::Files));
-    assert_eq!(
-        editor_test_save(&store, source, 100).await.unwrap().0,
-        saved
-    );
-    assert_eq!(
-        store.edit_origins(vec![saved]).await.unwrap(),
-        vec![(saved, source)]
+        SqliteClipboardStore::item_count(&store.db).await.unwrap(),
+        600
     );
 }
 
 #[tokio::test]
-async fn editor_commit_at_byte_limit_reclaims_multiple_entries_and_accounts_source_app() {
+async fn restoring_payload_refreshes_the_idle_clock() {
     let store = SqliteClipboardStore::connect(None).await.unwrap();
-    let source = editor_test_image(&store, "source", 100, false).await;
-    let first = editor_test_image(&store, "first", 1024, false).await;
-    let second = editor_test_image(&store, "second", 1024, false).await;
-    let current = editor_test_image(&store, "current", 100, true).await;
-    let mut policy = store.policy().await.unwrap();
-    policy.retention_days = 0;
-    policy.max_bytes = editor_test_bytes(&store).await;
-    store.update_policy(policy.clone()).await.unwrap();
-    let (saved, _) = editor_test_save(&store, source, 1800).await.unwrap();
-    assert!(store.image_png(first).await.unwrap().is_none());
-    assert!(store.image_png(second).await.unwrap().is_none());
-    assert_eq!(store.image_png(source).await.unwrap(), Some(vec![1; 100]));
-    assert_eq!(store.image_png(current).await.unwrap(), Some(vec![1; 100]));
-    assert!(editor_test_bytes(&store).await <= policy.max_bytes);
-    let model = clipboard_entry::Entity::find_by_id(saved as i64)
-        .one(&store.db)
+    let id = editor_test_image(&store, "used", 100, true).await;
+    store
+        .db
+        .execute(Statement::from_sql_and_values(
+            sea_orm::DbBackend::Sqlite,
+            "UPDATE clipboard_entries SET captured_at_ms=?, first_captured_at_ms=? WHERE id=?",
+            [
+                (Utc::now().timestamp_millis() - 40 * 86_400_000).into(),
+                (Utc::now().timestamp_millis() - 60 * 86_400_000).into(),
+                (id as i64).into(),
+            ],
+        ))
         .await
-        .unwrap()
         .unwrap();
-    assert_eq!(
-        model.storage_bytes,
-        1800 + byte_len("edited")
-            + byte_len("image")
-            + byte_len("Safari")
-            + byte_len("image\nsafari")
-    );
+    store.payload(id).await.unwrap();
+    store.maintain().await.unwrap();
+    assert!(store.image_png(id).await.unwrap().is_some());
 }
 
-#[tokio::test]
-async fn editor_commit_without_enough_reclaimable_space_rolls_back_and_can_retry() {
-    let store = SqliteClipboardStore::connect(None).await.unwrap();
-    let source = editor_test_image(&store, "source", 1024, false).await;
-    let reclaimable = editor_test_image(&store, "old", 100, false).await;
-    let current = editor_test_image(&store, "current", 1024, true).await;
-    let mut policy = store.policy().await.unwrap();
-    policy.retention_days = 0;
-    policy.max_bytes = editor_test_bytes(&store).await;
-    store.update_policy(policy.clone()).await.unwrap();
-    let before = store
-        .export_records(vec![source, reclaimable, current])
-        .await
-        .unwrap();
-    let revision = store.revision().await.unwrap();
-    let bytes = editor_test_bytes(&store).await;
-    for size in [500, policy.max_bytes as usize + 1] {
-        let error = editor_test_save(&store, source, size).await.unwrap_err();
-        assert!(error.to_string().contains("剪贴板历史空间不足"));
+#[test]
+fn idle_retention_migration_preserves_policy_and_history_without_a_runtime_context() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("idle-retention.sqlite3");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        use sea_orm_migration::{MigrationTrait, SchemaManager};
+        let store = SqliteClipboardStore::connect(Some(&path)).await.unwrap();
+        editor_test_image(&store, "original", 100, true).await;
+        let mut policy = store.policy().await.unwrap();
+        policy.retention_days = 0;
+        store.update_policy(policy).await.unwrap();
+        retention::IdleRetention.down(&SchemaManager::new(&store.db)).await.unwrap();
+        store.db.execute_unprepared("DELETE FROM seaql_migrations WHERE version='m20261004_clipboard_idle_retention'; UPDATE clipboard_state SET max_items=500, max_bytes=104857600").await.unwrap();
+        store.db.close().await.unwrap();
+    });
+    drop(runtime);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let store = SqliteClipboardStore::connect(Some(&path)).await.unwrap();
+        assert_eq!(store.policy().await.unwrap().retention_days, 0);
         assert_eq!(
-            store
-                .export_records(vec![source, reclaimable, current])
-                .await
-                .unwrap(),
-            before
+            SqliteClipboardStore::item_count(&store.db).await.unwrap(),
+            1
         );
-        assert_eq!(store.revision().await.unwrap(), revision);
-        assert_eq!(editor_test_bytes(&store).await, bytes);
-    }
-    policy.max_bytes *= 2;
-    store.update_policy(policy).await.unwrap();
-    let (saved, _) = editor_test_save(&store, source, 500).await.unwrap();
-    assert_eq!(
-        editor_test_save(&store, source, 500).await.unwrap().0,
-        saved
-    );
-    assert_eq!(
-        store
-            .history(ClipboardQuery::recent(100))
+        let row = store
+            .db
+            .query_one(Statement::from_string(
+                sea_orm::DbBackend::Sqlite,
+                "SELECT max_items, max_bytes FROM clipboard_state WHERE id=1".to_owned(),
+            ))
             .await
             .unwrap()
-            .entries
-            .len(),
-        4
-    );
+            .unwrap();
+        assert_eq!(row.try_get::<i32>("", "max_items").unwrap(), 0);
+        assert_eq!(row.try_get::<i64>("", "max_bytes").unwrap(), 0);
+        store.db.close().await.unwrap();
+    });
 }
 
 #[tokio::test]
-async fn editor_commit_cannot_evict_source_when_item_limit_is_one() {
-    let store = SqliteClipboardStore::connect(None).await.unwrap();
-    let source = editor_test_image(&store, "source", 100, true).await;
-    let mut policy = store.policy().await.unwrap();
-    policy.max_items = 1;
-    store.update_policy(policy).await.unwrap();
-    assert!(editor_test_save(&store, source, 100).await.is_err());
-    assert_eq!(store.image_png(source).await.unwrap(), Some(vec![1; 100]));
-    assert_eq!(
-        store
-            .history(ClipboardQuery::recent(100))
-            .await
-            .unwrap()
-            .entries
-            .len(),
-        1
-    );
-}
-
-#[tokio::test]
-async fn editor_commit_reclaims_more_than_one_metadata_batch() {
-    let store = SqliteClipboardStore::connect(None).await.unwrap();
-    let source = editor_test_image(&store, "source", 100, false).await;
-    let mut candidates = Vec::new();
-    for index in 0..130 {
-        candidates.push(editor_test_image(&store, &format!("old-{index}"), 200, false).await);
-    }
-    let current = editor_test_image(&store, "current", 100, true).await;
-    let models = clipboard_entry::Entity::find()
-        .filter(clipboard_entry::Column::Id.is_in(candidates.iter().map(|id| *id as i64)))
-        .all(&store.db)
-        .await
-        .unwrap();
-    let reclaimable_bytes: i64 = models.iter().map(|model| model.storage_bytes).sum();
-    let mut policy = store.policy().await.unwrap();
-    policy.retention_days = 0;
-    policy.max_bytes = editor_test_bytes(&store).await;
-    store.update_policy(policy.clone()).await.unwrap();
-    let (saved, _) = editor_test_save(&store, source, reclaimable_bytes as usize - 100)
-        .await
-        .unwrap();
-    let entries = store
-        .history(ClipboardQuery::recent(100))
+async fn recently_used_replica_survives_idle_retention_and_stale_usage_updates() {
+    let source = SqliteClipboardStore::connect(None).await.unwrap();
+    let id = editor_test_image(&source, "replica-used", 100, false).await;
+    let now = Utc::now().timestamp_millis();
+    source.db.execute(Statement::from_sql_and_values(sea_orm::DbBackend::Sqlite,
+        "UPDATE clipboard_entries SET captured_at_ms=?, first_captured_at_ms=?, last_used_at_ms=? WHERE id=?",
+        [(now-45*86_400_000).into(), (now-60*86_400_000).into(), (now-15*86_400_000).into(), (id as i64).into()],
+    )).await.unwrap();
+    let page = source.replica_page(None, 10).await.unwrap();
+    let replica = source
+        .replica_record(&page.records[0].record.sync_id)
         .await
         .unwrap()
-        .entries;
-    assert_eq!(entries.len(), 3);
-    for id in [source, current, saved] {
-        assert!(entries.iter().any(|entry| entry.id == id));
-    }
-    assert!(editor_test_bytes(&store).await <= policy.max_bytes);
+        .unwrap();
+    assert_eq!(replica.last_used_at_ms, Some(now - 15 * 86_400_000));
+    let target = SqliteClipboardStore::connect(None).await.unwrap();
+    assert!(target.apply_replica_record(replica.clone()).await.unwrap());
+    target.maintain().await.unwrap();
+    let mut newer = replica.clone();
+    newer.last_used_at_ms = Some(now);
+    newer.record.image_png = None; // Usage-only replication must reuse the existing payload.
+    assert!(target.apply_replica_record(newer.clone()).await.unwrap());
+    assert!(!target.apply_replica_record(replica).await.unwrap());
+    let saved = target
+        .replica_record(&newer.record.sync_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.last_used_at_ms, Some(now));
+    assert_eq!(saved.record.image_png, Some(vec![1; 100]));
+    assert!(target.replica_selection().await.unwrap().is_none());
 }

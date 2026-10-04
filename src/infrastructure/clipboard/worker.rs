@@ -190,6 +190,10 @@ pub(super) fn start_database_worker(
                     } else { tokio::select! { biased;
                         _ = stopping.changed(), if !*stopping.borrow() => { rx.close(); rx.recv().await },
                         command = rx.recv() => command,
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
+                            store.maintenance_pending.store(true, std::sync::atomic::Ordering::Release);
+                            continue;
+                        },
                     } };
                     let Some(command) = command else { break; };
                     handle_database_command(&store, &change_tx, &capture_tx, &ocr_job_tx, command).await;

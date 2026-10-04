@@ -171,6 +171,7 @@ pub struct ClipboardReplicaRecord {
     pub record: ClipboardSyncRecord,
     pub first_captured_at_ms: i64,
     pub copy_count: u32,
+    pub last_used_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -280,11 +281,7 @@ pub struct ClipboardTimelinePage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClipboardPolicy {
     pub history_enabled: bool,
-    /// Soft item limit for each of shared content and device-local file history.
-    pub max_items: u32,
-    /// Soft byte limit per history scope; local file paths cannot evict shared content.
-    pub max_bytes: u64,
-    /// Zero means no age-based expiration.
+    /// Days since the most recent capture or use; zero keeps history forever.
     pub retention_days: u32,
     pub save_sensitive: bool,
 }
@@ -293,8 +290,6 @@ impl Default for ClipboardPolicy {
     fn default() -> Self {
         Self {
             history_enabled: true,
-            max_items: 500,
-            max_bytes: 100 * 1024 * 1024,
             retention_days: 30,
             save_sensitive: false,
         }

@@ -64,12 +64,6 @@ pub(super) struct SqliteClipboardStore {
     pub(in crate::infrastructure) maintenance_pending: std::sync::atomic::AtomicBool,
 }
 
-#[derive(FromQueryResult)]
-struct PruneCandidate {
-    id: i64,
-    storage_bytes: i64,
-}
-
 struct StoredValues {
     text_payload: Option<String>,
     html_payload: Option<String>,
@@ -499,8 +493,6 @@ fn next_revision(current: &i64) -> i64 {
 fn policy_from_state(state: &clipboard_state::Model) -> ClipboardPolicy {
     ClipboardPolicy {
         history_enabled: state.history_enabled,
-        max_items: state.max_items.max(1) as u32,
-        max_bytes: state.max_bytes.max(1) as u64,
         retention_days: state.retention_days.max(0) as u32,
         save_sensitive: state.save_sensitive,
     }
