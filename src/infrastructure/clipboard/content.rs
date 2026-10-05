@@ -1,23 +1,56 @@
 use super::*;
 
-pub(super) struct EncodedClipboardImage {
-    pub mode: ClipboardPasteMode,
-    pub bytes: Vec<u8>,
-}
+const IMAGE_PASTE_DIRECTORY: &str = "arcrelay-clipboard-paste";
 
-pub(super) struct PreparedEncodedImage {
-    pub clipboard_payload: ClipboardPayload,
-    pub history_payload: ClipboardPayload,
-    pub encoded: EncodedClipboardImage,
-}
-
-// History and replication retain the selected record; the requested encoding
-// is a one-shot native clipboard representation. In particular, the PNG made
-// from decoded JPEG pixels must not become a second history record.
-pub(super) fn prepare_encoded_image(
+// These files outlive the paste request: recipients may read them later and
+// file history must remain usable until the OS cleans its temporary directory.
+pub(super) fn prepare_image_file(
     payload: ClipboardPayload,
     mode: ClipboardPasteMode,
-) -> Result<PreparedEncodedImage> {
+) -> Result<ClipboardPayload> {
+    use std::io::Write;
+
+    let bytes = encode_paste_image(payload, mode)?;
+    let directory = std::env::temp_dir().join(IMAGE_PASTE_DIRECTORY);
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| Error::Clipboard(format!("create image paste directory: {error}")))?;
+    #[cfg(not(target_os = "windows"))]
+    let directory = directory
+        .canonicalize()
+        .map_err(|error| Error::Clipboard(format!("resolve image paste directory: {error}")))?;
+    // Keep ordinary DOS/UNC paths for CF_HDROP consumers such as Explorer;
+    // Windows canonicalize would add a verbatim (\\?\) prefix.
+    #[cfg(target_os = "windows")]
+    let directory = std::path::absolute(&directory)
+        .map_err(|error| Error::Clipboard(format!("resolve image paste directory: {error}")))?;
+    let extension = if mode == ClipboardPasteMode::ImageJpg {
+        "jpg"
+    } else {
+        "png"
+    };
+    let path = directory.join(format!("ArcRelay-{}.{}", uuid::Uuid::new_v4(), extension));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .map_err(|error| Error::Clipboard(format!("create image paste file: {error}")))?;
+    if let Err(error) = file.write_all(&bytes) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(Error::Clipboard(format!("write image paste file: {error}")));
+    }
+    drop(file);
+    Ok(ClipboardPayload::Files(vec![path
+        .to_string_lossy()
+        .into_owned()]))
+}
+
+fn encode_paste_image(payload: ClipboardPayload, mode: ClipboardPasteMode) -> Result<Vec<u8>> {
     let ClipboardPayload::Image { ref png, .. } = payload else {
         return Err(Error::Clipboard(
             "this paste format is only available for image records".into(),
@@ -55,11 +88,7 @@ pub(super) fn prepare_encoded_image(
         .into_rgba8();
     if mode == ClipboardPasteMode::ImagePng {
         let bytes = png.clone();
-        return Ok(PreparedEncodedImage {
-            clipboard_payload: payload.clone(),
-            history_payload: payload,
-            encoded: EncodedClipboardImage { mode, bytes },
-        });
+        return Ok(bytes);
     }
     let (width, height) = rgba.dimensions();
     let rgb = image::RgbImage::from_fn(width, height, |x, y| {
@@ -74,90 +103,7 @@ pub(super) fn prepare_encoded_image(
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 95)
         .encode_image(&rgb)
         .map_err(|error| Error::Clipboard(format!("encode JPG: {error}")))?;
-    drop(rgb);
-    // Fingerprints and bitmap fallbacks must describe the actual JPEG pixels,
-    // including its lossy encoding, to avoid recapturing our own paste.
-    let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg)
-        .map_err(|error| Error::Clipboard(format!("decode JPG: {error}")))?;
-    let mut canonical_png = std::io::Cursor::new(Vec::new());
-    decoded
-        .write_to(&mut canonical_png, image::ImageFormat::Png)
-        .map_err(|error| Error::Clipboard(format!("normalize JPG: {error}")))?;
-    Ok(PreparedEncodedImage {
-        clipboard_payload: ClipboardPayload::Image {
-            png: canonical_png.into_inner(),
-            width,
-            height,
-        },
-        history_payload: payload,
-        encoded: EncodedClipboardImage { mode, bytes },
-    })
-}
-
-pub(super) fn write_encoded_image(
-    context: &ClipboardContext,
-    payload: ClipboardPayload,
-    encoded: EncodedClipboardImage,
-    local_only: bool,
-) -> Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = context;
-        macos::write_payload_as_image(payload, encoded, local_only)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = local_only;
-        let ClipboardPayload::Image { png, .. } = payload else {
-            return Err(Error::Clipboard("image payload is missing".into()));
-        };
-        let jpg = encoded.mode == ClipboardPasteMode::ImageJpg;
-        let mut contents = Vec::new();
-        // Windows bitmap-only recipients need a fallback. Put it first because
-        // clipboard-rs's set_image clears the clipboard on Windows.
-        #[cfg(target_os = "windows")]
-        contents.push(ClipboardContent::Image(
-            clipboard_rs::RustImageData::from_bytes(&png)
-                .map_err(|error| Error::Clipboard(format!("decode stored image: {error}")))?,
-        ));
-        let _ = png;
-        contents.push(ClipboardContent::Other(
-            if cfg!(target_os = "windows") {
-                if jpg {
-                    "JFIF"
-                } else {
-                    "PNG"
-                }
-            } else if jpg {
-                "image/jpeg"
-            } else {
-                "image/png"
-            }
-            .into(),
-            encoded.bytes.clone(),
-        ));
-        context
-            .set(contents)
-            .map_err(|error| Error::Clipboard(format!("write image format: {error}")))?;
-        let format = if cfg!(target_os = "windows") {
-            if jpg {
-                "JFIF"
-            } else {
-                "PNG"
-            }
-        } else if jpg {
-            "image/jpeg"
-        } else {
-            "image/png"
-        };
-        // clipboard-rs on Windows can report success after a failed setter.
-        if context.get_buffer(format).ok().as_deref() != Some(encoded.bytes.as_slice()) {
-            return Err(Error::Clipboard(
-                "image format write could not be verified; paste cancelled".into(),
-            ));
-        }
-        Ok(())
-    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -178,18 +124,16 @@ mod image_paste_tests {
     #[test]
     fn png_paste_preserves_bytes_dimensions_and_transparency() {
         let original = source([120, 60, 0, 128]);
-        let prepared =
-            prepare_encoded_image(original.clone(), ClipboardPasteMode::ImagePng).unwrap();
-        assert_eq!(prepared.clipboard_payload, original);
-        assert_eq!(prepared.history_payload, original);
-        let encoded = prepared.encoded;
+        let bytes = encode_paste_image(original.clone(), ClipboardPasteMode::ImagePng).unwrap();
+        let ClipboardPayload::Image { png, .. } = &original else {
+            panic!("expected image")
+        };
+        assert_eq!(&bytes, png);
         assert_eq!(
-            image::guess_format(&encoded.bytes).unwrap(),
+            image::guess_format(&bytes).unwrap(),
             image::ImageFormat::Png
         );
-        let image = image::load_from_memory(&encoded.bytes)
-            .unwrap()
-            .into_rgba8();
+        let image = image::load_from_memory(&bytes).unwrap().into_rgba8();
         assert_eq!(image.dimensions(), (4, 3));
         assert_eq!(image.get_pixel(0, 0).0, [120, 60, 0, 128]);
     }
@@ -202,28 +146,91 @@ mod image_paste_tests {
             ([40, 80, 120, 255], [40, 80, 120]),
         ] {
             let original = source(pixel);
-            let prepared =
-                prepare_encoded_image(original.clone(), ClipboardPasteMode::ImageJpg).unwrap();
-            let encoded = prepared.encoded;
+            let bytes = encode_paste_image(original.clone(), ClipboardPasteMode::ImageJpg).unwrap();
             assert_eq!(
-                image::guess_format(&encoded.bytes).unwrap(),
+                image::guess_format(&bytes).unwrap(),
                 image::ImageFormat::Jpeg
             );
-            let image = image::load_from_memory(&encoded.bytes).unwrap().into_rgb8();
+            let image = image::load_from_memory(&bytes).unwrap().into_rgb8();
             assert_eq!(image.dimensions(), (4, 3));
             for (actual, expected) in image.get_pixel(0, 0).0.into_iter().zip(expected) {
                 assert!(actual.abs_diff(expected) <= 3);
             }
-            let ClipboardPayload::Image { png, .. } = prepared.clipboard_payload else {
-                panic!("expected image");
-            };
-            assert_eq!(image::load_from_memory(&png).unwrap().into_rgb8(), image);
-            assert_eq!(prepared.history_payload, original);
             assert_eq!(
                 original,
                 source(pixel),
                 "conversion must not mutate the source"
             );
+        }
+    }
+
+    #[test]
+    fn image_paste_materializes_files_that_are_not_recaptured_as_images() {
+        for (mode, extension, format) in [
+            (
+                ClipboardPasteMode::ImageJpg,
+                "jpg",
+                image::ImageFormat::Jpeg,
+            ),
+            (ClipboardPasteMode::ImagePng, "png", image::ImageFormat::Png),
+        ] {
+            let payload = prepare_image_file(source([40, 80, 120, 128]), mode).unwrap();
+            assert_eq!(payload_kind(&payload), ClipboardContentKind::Files);
+            let ClipboardPayload::Files(paths) = payload else {
+                panic!("expected files")
+            };
+            assert_eq!(paths.len(), 1);
+            let path = Path::new(&paths[0]);
+            assert!(path.is_absolute());
+            assert_eq!(path.extension().unwrap(), extension);
+            assert_eq!(validate_file_paths(paths.clone()).unwrap(), paths);
+            let bytes = std::fs::read(path).unwrap();
+            assert_eq!(image::guess_format(&bytes).unwrap(), format);
+            assert_eq!(image::load_from_memory(&bytes).unwrap().width(), 4);
+            assert!(image_payload_from_file(&paths[0]).unwrap().is_none());
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn image_paste_history_retains_the_temporary_file_path() {
+        let store = SqliteClipboardStore::connect(None).await.unwrap();
+        for mode in [ClipboardPasteMode::ImageJpg, ClipboardPasteMode::ImagePng] {
+            let payload = prepare_image_file(source([40, 80, 120, 128]), mode).unwrap();
+            let ClipboardPayload::Files(ref paths) = payload else {
+                panic!("expected files")
+            };
+            let paths = paths.clone();
+            let record = store
+                .store(
+                    payload.clone(),
+                    content_hash(&payload),
+                    summarize(&payload, Some("ArcRelay".into())),
+                    true,
+                    "local",
+                    "Local",
+                    true,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(record.kind, ClipboardContentKind::Files);
+            assert!(record.image_png.is_none());
+            let page = store.history(ClipboardQuery::recent(10)).await.unwrap();
+            let id = page
+                .entries
+                .iter()
+                .find(|entry| {
+                    entry.kind == ClipboardContentKind::Files
+                        && entry
+                            .preview
+                            .contains(Path::new(&paths[0]).file_name().unwrap().to_str().unwrap())
+                })
+                .unwrap()
+                .id;
+            assert_eq!(store.file_paths(id).await.unwrap(), paths);
+            assert_eq!(store.payload(id).await.unwrap().0, payload);
+            std::fs::remove_file(&paths[0]).unwrap();
         }
     }
 
@@ -234,7 +241,7 @@ mod image_paste_tests {
             .write_to(&mut png, image::ImageFormat::Png)
             .unwrap();
         for mode in [ClipboardPasteMode::ImageJpg, ClipboardPasteMode::ImagePng] {
-            assert!(prepare_encoded_image(
+            assert!(encode_paste_image(
                 ClipboardPayload::Image {
                     png: png.get_ref().clone(),
                     width: 16_385,
@@ -249,9 +256,9 @@ mod image_paste_tests {
     #[test]
     fn image_paste_rejects_text_and_malformed_images() {
         for mode in [ClipboardPasteMode::ImageJpg, ClipboardPasteMode::ImagePng] {
-            assert!(prepare_encoded_image(ClipboardPayload::Text("text".into()), mode).is_err());
+            assert!(encode_paste_image(ClipboardPayload::Text("text".into()), mode).is_err());
             assert!(convert_payload(&ClipboardPayload::Text("text".into()), mode).is_err());
-            assert!(prepare_encoded_image(
+            assert!(encode_paste_image(
                 ClipboardPayload::Image {
                     png: b"invalid".to_vec(),
                     width: 1,
@@ -261,7 +268,7 @@ mod image_paste_tests {
             )
             .is_err());
         }
-        assert!(prepare_encoded_image(
+        assert!(encode_paste_image(
             ClipboardPayload::Image {
                 png: b"invalid".to_vec(),
                 width: 1,
@@ -513,6 +520,21 @@ pub(super) fn plain_text_html(text: &str) -> String {
 
 pub(super) fn image_payload_from_file(path: &str) -> Result<Option<ClipboardPayload>> {
     let path_ref = Path::new(path);
+    // Preserve file semantics for our format-conversion artifacts, including
+    // clipboard capture after an application restart.
+    if path_ref.parent().is_some_and(|parent| {
+        parent
+            .file_name()
+            .is_some_and(|name| name == IMAGE_PASTE_DIRECTORY)
+            && parent.canonicalize().is_ok_and(|parent| {
+                std::env::temp_dir()
+                    .join(IMAGE_PASTE_DIRECTORY)
+                    .canonicalize()
+                    .is_ok_and(|directory| directory == parent)
+            })
+    }) {
+        return Ok(None);
+    }
     let extension = path_ref
         .extension()
         .and_then(|value| value.to_str())

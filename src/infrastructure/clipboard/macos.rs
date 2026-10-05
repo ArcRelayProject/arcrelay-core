@@ -57,30 +57,6 @@ pub(super) fn write_payload(payload: ClipboardPayload, local_only: bool) -> Resu
 }
 
 fn write_to(board: &NSPasteboard, payload: ClipboardPayload, local_only: bool) -> Result<()> {
-    write_to_as_image(board, payload, local_only, None)
-}
-
-pub(super) fn write_payload_as_image(
-    payload: ClipboardPayload,
-    encoded: EncodedClipboardImage,
-    local_only: bool,
-) -> Result<()> {
-    autoreleasepool(|_| {
-        write_to_as_image(
-            &NSPasteboard::generalPasteboard(),
-            payload,
-            local_only,
-            Some(encoded),
-        )
-    })
-}
-
-fn write_to_as_image(
-    board: &NSPasteboard,
-    payload: ClipboardPayload,
-    local_only: bool,
-    encoded: Option<EncodedClipboardImage>,
-) -> Result<()> {
     let item = NSPasteboardItem::new();
     let mut items = Vec::new();
     let set_string = |item: &NSPasteboardItem, value: &str, kind: &NSString| {
@@ -117,16 +93,7 @@ fn write_to_as_image(
         }
         ClipboardPayload::Image { png, .. } => {
             decode_image_png(&png)?;
-            if let Some(encoded) = encoded {
-                let kind = NSString::from_str(if encoded.mode == ClipboardPasteMode::ImageJpg {
-                    "public.jpeg"
-                } else {
-                    "public.png"
-                });
-                item.setData_forType(&NSData::with_bytes(&encoded.bytes), &kind)
-            } else {
-                item.setData_forType(&NSData::with_bytes(&png), unsafe { NSPasteboardTypePNG })
-            }
+            item.setData_forType(&NSData::with_bytes(&png), unsafe { NSPasteboardTypePNG })
         }
         ClipboardPayload::Files(paths) => {
             for path in paths {
@@ -189,17 +156,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn explicit_image_format_writes_only_the_requested_representation() {
+    fn image_format_paste_writes_file_urls_without_image_representations() {
         autoreleasepool(|_| {
-            for (mode, kind, absent) in [
-                (ClipboardPasteMode::ImageJpg, "public.jpeg", "public.png"),
-                (ClipboardPasteMode::ImagePng, "public.png", "public.jpeg"),
-            ] {
+            for mode in [ClipboardPasteMode::ImageJpg, ClipboardPasteMode::ImagePng] {
                 let mut png = std::io::Cursor::new(Vec::new());
                 image::RgbaImage::from_pixel(2, 2, image::Rgba([50, 100, 150, 128]))
                     .write_to(&mut png, image::ImageFormat::Png)
                     .unwrap();
-                let prepared = prepare_encoded_image(
+                let payload = prepare_image_file(
                     ClipboardPayload::Image {
                         png: png.into_inner(),
                         width: 2,
@@ -208,25 +172,25 @@ mod tests {
                     mode,
                 )
                 .unwrap();
-                let expected = prepared.encoded.bytes.clone();
+                let ClipboardPayload::Files(ref paths) = payload else {
+                    panic!("expected files")
+                };
+                let path = paths[0].clone();
                 let board = NSPasteboard::pasteboardWithUniqueName();
-                write_to_as_image(
-                    &board,
-                    prepared.clipboard_payload,
-                    true,
-                    Some(prepared.encoded),
-                )
-                .unwrap();
+                write_to(&board, payload, true).unwrap();
+                let url = NSURL::fileURLWithPath(&NSString::from_str(&path));
                 assert_eq!(
                     board
-                        .dataForType(&NSString::from_str(kind))
-                        .unwrap()
-                        .to_vec(),
-                    expected
+                        .stringForType(unsafe { NSPasteboardTypeFileURL })
+                        .unwrap(),
+                    url.absoluteString().unwrap(),
                 );
-                assert!(board.dataForType(&NSString::from_str(absent)).is_none());
+                for absent in ["public.jpeg", "public.png"] {
+                    assert!(board.dataForType(&NSString::from_str(absent)).is_none());
+                }
                 assert_eq!(stamp_for(&board).origin, NativeClipboardOrigin::ArcRelay);
                 board.clearContents();
+                std::fs::remove_file(path).unwrap();
             }
         });
     }

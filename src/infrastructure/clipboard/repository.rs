@@ -181,31 +181,23 @@ impl ClipboardRepository for NativeClipboard {
             ) => ClipboardPayload::Text(self.wait_for_image_ocr_text(id).await?),
             (payload, mode) => convert_payload(&payload, mode)?,
         };
-        let (payload, history_payload, encoded_image) = if matches!(
+        let image_file = matches!(
             mode,
             ClipboardPasteMode::ImageJpg | ClipboardPasteMode::ImagePng
-        ) {
-            let prepared =
-                tokio::task::spawn_blocking(move || prepare_encoded_image(payload, mode))
-                    .await
-                    .map_err(|error| Error::Clipboard(error.to_string()))??;
-            (
-                prepared.clipboard_payload,
-                Some(prepared.history_payload),
-                Some(prepared.encoded),
-            )
+        );
+        let payload = if image_file {
+            tokio::task::spawn_blocking(move || prepare_image_file(payload, mode))
+                .await
+                .map_err(|error| Error::Clipboard(error.to_string()))??
         } else {
-            (payload, None, None)
+            payload
         };
         let kind = payload_kind(&payload);
         let fingerprints = clipboard_fingerprints(&payload);
-        self.write_system_clipboard_as(payload.clone(), false, encoded_image)?;
+        // Local file URLs must not be handed off to another device.
+        self.write_system_clipboard(payload.clone(), kind == ClipboardContentKind::Files)?;
         if let Some(record) = self
-            .store_payload(
-                history_payload.unwrap_or(payload),
-                Some("ArcRelay".into()),
-                true,
-            )
+            .store_payload(payload, Some("ArcRelay".into()), true)
             .await?
         {
             self.commit_system_selection(&record, &fingerprints)?;
