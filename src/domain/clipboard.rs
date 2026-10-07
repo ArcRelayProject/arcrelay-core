@@ -506,6 +506,22 @@ pub trait ClipboardRepository: Send + Sync {
     /// history. Kept for the existing write-clipboard capability.
     async fn set_text(&self, content: &str) -> crate::error::Result<()>;
 
+    /// A private, local-only write that never enters history or replication.
+    async fn set_ephemeral_text(&self, _content: &str) -> crate::error::Result<String> {
+        Err(crate::error::Error::NotSupported(
+            "private clipboard writes".into(),
+        ))
+    }
+    /// Clear only the unchanged private write identified by this opaque receipt.
+    async fn clear_ephemeral_text(&self, _receipt: &str) -> crate::error::Result<bool> {
+        Ok(false)
+    }
+
+    /// Clear the current private write on session lock/shutdown, preserving other writers.
+    async fn clear_owned_ephemeral_text(&self) -> crate::error::Result<bool> {
+        Ok(false)
+    }
+
     /// Restore a host-owned record to the system clipboard. The record payload
     /// stays local; callers address it only by id.
     async fn activate(

@@ -15,4 +15,10 @@ pub mod infrastructure {
     #[allow(dead_code)]
     mod clipboard_store;
     pub mod clipboard_test_support;
+    pub mod login_vault;
+}
+
+#[cfg(all(not(feature = "native"), not(feature = "test-support")))]
+pub mod infrastructure {
+    pub mod login_vault;
 }

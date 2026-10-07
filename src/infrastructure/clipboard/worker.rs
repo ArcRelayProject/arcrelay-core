@@ -18,6 +18,18 @@ pub(super) fn run_clipboard_capture_worker(worker: ClipboardCaptureWorker) {
         let result = (|| -> Result<()> {
             let _work = capture_work(&context, &resources)?;
             let mut state = lock_capture_state(&capture_state)?;
+            if context
+                .available_formats()
+                .map_err(|_| Error::Clipboard("clipboard formats unavailable".into()))?
+                .iter()
+                .any(|f| {
+                    f == PRIVATE_MARKER
+                        || f == "org.nspasteboard.ConcealedType"
+                        || f == "ExcludeClipboardContentFromMonitorProcessing"
+                })
+            {
+                return Ok(());
+            }
             #[cfg(target_os = "macos")]
             let stamp = macos::stamp();
             #[cfg(target_os = "macos")]
@@ -41,6 +53,18 @@ pub(super) fn run_clipboard_capture_worker(worker: ClipboardCaptureWorker) {
             let origin = stamp.origin;
             #[cfg(not(target_os = "macos"))]
             if origin != external_clipboard_origin(&context) {
+                return Ok(());
+            }
+            if context
+                .available_formats()
+                .map_err(|_| Error::Clipboard("clipboard formats unavailable".into()))?
+                .iter()
+                .any(|f| {
+                    f == PRIVATE_MARKER
+                        || f == "org.nspasteboard.ConcealedType"
+                        || f == "ExcludeClipboardContentFromMonitorProcessing"
+                })
+            {
                 return Ok(());
             }
             let fingerprints = clipboard_fingerprints_reusing(&payload, state.current.as_ref());

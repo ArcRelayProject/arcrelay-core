@@ -198,6 +198,17 @@ impl ClipboardApplicationService {
         self.repository.update_policy(policy).await
     }
 
+    pub async fn set_ephemeral_text(&self, content: &str) -> Result<String> {
+        self.repository.set_ephemeral_text(content).await
+    }
+    pub async fn clear_ephemeral_text(&self, receipt: &str) -> Result<bool> {
+        self.repository.clear_ephemeral_text(receipt).await
+    }
+
+    pub async fn clear_owned_ephemeral_text(&self) -> Result<bool> {
+        self.repository.clear_owned_ephemeral_text().await
+    }
+
     pub async fn set_text(&self, content: &str) -> Result<()> {
         self.repository.set_text(content).await
     }

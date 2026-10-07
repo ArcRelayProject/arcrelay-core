@@ -33,6 +33,7 @@ use crate::error::{Error, Result};
 use crate::infrastructure::clipboard_ocr::{ClipboardOcr, OCR_MODEL_VERSION};
 use crate::infrastructure::clipboard_store::{ImageOcrState, SqliteClipboardStore};
 
+const PRIVATE_MARKER: &str = "cn.arcrelay.clipboard.private";
 const MAX_PREVIEW_CHARS: usize = 140;
 const MAX_TEXT_SYNTAX_DETECTION_BYTES: usize = 64 * 1024;
 const MAX_SAFE_HTML_SOURCE_BYTES: usize = 256 * 1024;
@@ -53,6 +54,7 @@ struct ClipboardFingerprints {
 struct ClipboardCaptureState {
     // The currently observed content has no timeout: Handoff may arrive late.
     current: Option<ClipboardFingerprints>,
+    private_receipt: Option<String>,
     selection: Option<ClipboardSelection>,
     // Platforms without native origin markers retain the short write fallback.
     writes: VecDeque<(ClipboardFingerprints, Instant)>,
@@ -561,6 +563,8 @@ struct ClipboardCaptureWorker {
 mod content;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "windows")]
+mod private_windows;
 mod repository;
 mod text_preview;
 mod worker;

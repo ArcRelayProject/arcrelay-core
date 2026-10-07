@@ -4,6 +4,7 @@ mod clipboard_ocr;
 mod clipboard_store;
 pub mod device;
 pub mod input_control;
+pub mod login_vault;
 pub mod media_control;
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub mod process;

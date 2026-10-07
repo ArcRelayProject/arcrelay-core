@@ -405,3 +405,87 @@ mod tests {
         });
     }
 }
+
+// The marker and secret share a single local-only item. Receipts contain no secret.
+pub(super) fn write_private(text: &str, receipt: &str) -> Result<String> {
+    autoreleasepool(|_| write_private_to(&NSPasteboard::generalPasteboard(), text, receipt))
+}
+fn write_private_to(board: &NSPasteboard, text: &str, receipt: &str) -> Result<String> {
+    let item = NSPasteboardItem::new();
+    if !item.setString_forType(
+        &NSString::from_str(write_identity()),
+        &NSString::from_str(WRITE_MARKER),
+    ) || !item.setString_forType(&NSString::from_str(text), unsafe { NSPasteboardTypeString })
+        || !item.setString_forType(
+            &NSString::from_str(receipt),
+            &NSString::from_str(PRIVATE_MARKER),
+        )
+        || !item.setString_forType(
+            &NSString::from_str("1"),
+            &NSString::from_str("org.nspasteboard.ConcealedType"),
+        )
+    {
+        return Err(Error::Clipboard(
+            "private clipboard preparation failed".into(),
+        ));
+    }
+    board.prepareForNewContentsWithOptions(NSPasteboardContentsOptions::CurrentHostOnly);
+    let object = ProtocolObject::from_ref(&*item);
+    let items = NSArray::from_slice(&[object]);
+    if !board.writeObjects(&items) {
+        return Err(Error::Clipboard("private clipboard write failed".into()));
+    }
+    Ok(format!("{}:{}", receipt, board.changeCount()))
+}
+pub(super) fn clear_private(receipt: &str) -> bool {
+    autoreleasepool(|_| clear_private_from(&NSPasteboard::generalPasteboard(), receipt))
+}
+fn clear_private_from(board: &NSPasteboard, receipt: &str) -> bool {
+    let Some((receipt, expected)) = receipt.rsplit_once(':') else {
+        return false;
+    };
+    let count = board.changeCount();
+    if expected.parse::<isize>().ok() != Some(count) {
+        return false;
+    }
+    if board
+        .stringForType(&NSString::from_str(PRIVATE_MARKER))
+        .map(|v| v.to_string())
+        .as_deref()
+        != Some(receipt)
+        || board.changeCount() != count
+    {
+        return false;
+    }
+    board.clearContents();
+    true
+}
+#[cfg(test)]
+#[test]
+fn login_private_copy_is_suppressed_and_cleanup_preserves_newer_same_text() {
+    autoreleasepool(|_| {
+        let board = NSPasteboard::pasteboardWithUniqueName();
+        let receipt = write_private_to(&board, "private-test-value", "test-receipt").unwrap();
+        assert_eq!(stamp_for(&board).origin, NativeClipboardOrigin::ArcRelay);
+        assert!(board
+            .types()
+            .unwrap()
+            .iter()
+            .any(|t| t.to_string() == PRIVATE_MARKER));
+        assert!(clear_private_from(&board, &receipt));
+        let receipt = write_private_to(&board, "same-text", "test-receipt").unwrap();
+        board.clearContents();
+        board.setString_forType(&NSString::from_str("same-text"), unsafe {
+            NSPasteboardTypeString
+        });
+        assert!(!clear_private_from(&board, &receipt));
+        assert_eq!(
+            board
+                .stringForType(unsafe { NSPasteboardTypeString })
+                .unwrap()
+                .to_string(),
+            "same-text"
+        );
+        board.clearContents();
+    });
+}

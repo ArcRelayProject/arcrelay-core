@@ -416,6 +416,7 @@ fn external_relay_image_fingerprint_ignores_png_encoding_but_preserves_pixels() 
     assert_ne!(original.content_hash, reencoded.content_hash);
     assert_eq!(original.semantic_hash, reencoded.semantic_hash);
     let mut state = ClipboardCaptureState {
+        private_receipt: None,
         current: Some(original),
         ..Default::default()
     };
@@ -519,6 +520,7 @@ fn committed_local_selection_rejects_its_replica_echo() {
     };
     let committed = ClipboardSelectionKey(1001, "local".into(), "sync-id".into(), 7);
     let mut state = ClipboardCaptureState {
+        private_receipt: None,
         current: Some(fingerprints.clone()),
         selection: Some(ClipboardSelection {
             key: ClipboardSelectionKey(1000, "local".into(), "content-hash".into(), 0),
@@ -543,6 +545,7 @@ fn committed_local_selection_does_not_replace_a_newer_native_selection() {
     };
     let newer = ClipboardSelectionKey(2000, "peer".into(), "newer".into(), 3);
     let mut state = ClipboardCaptureState {
+        private_receipt: None,
         current: Some(fingerprints.clone()),
         selection: Some(ClipboardSelection {
             key: newer.clone(),

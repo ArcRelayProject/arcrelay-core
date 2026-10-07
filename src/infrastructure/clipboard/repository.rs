@@ -3,6 +3,14 @@ use super::*;
 #[async_trait::async_trait]
 impl ClipboardRepository for NativeClipboard {
     async fn shutdown(&self) {
+        let receipt = self
+            .capture_state
+            .lock()
+            .ok()
+            .and_then(|s| s.private_receipt.clone());
+        if let Some(receipt) = receipt {
+            let _ = self.clear_ephemeral_text(&receipt).await;
+        }
         self.workers.shutdown().await;
     }
 
@@ -150,6 +158,69 @@ impl ClipboardRepository for NativeClipboard {
     async fn update_policy(&self, policy: ClipboardPolicy) -> Result<()> {
         self.request(|response| DbCommand::UpdatePolicy(policy, response))
             .await
+    }
+
+    async fn set_ephemeral_text(&self, content: &str) -> Result<String> {
+        let context = self
+            .context
+            .lock()
+            .map_err(|_| Error::Clipboard("clipboard lock poisoned".into()))?;
+        let mut state = lock_capture_state(&self.capture_state)?;
+        let receipt = uuid::Uuid::new_v4().to_string();
+        #[cfg(target_os = "macos")]
+        let result = {
+            let _ = &context;
+            macos::write_private(content, &receipt)
+        };
+        #[cfg(target_os = "windows")]
+        let result = {
+            let _ = &context;
+            private_windows::write(content, &receipt)
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let result = {
+            let _ = (&context, receipt, content);
+            Err(Error::NotSupported(
+                "Private credential copying is not supported on this system".into(),
+            ))
+        };
+        let receipt = result?;
+        state.private_receipt = Some(receipt.clone());
+        Ok(receipt)
+    }
+
+    async fn clear_ephemeral_text(&self, receipt: &str) -> Result<bool> {
+        let context = self
+            .context
+            .lock()
+            .map_err(|_| Error::Clipboard("clipboard lock poisoned".into()))?;
+        let _state = lock_capture_state(&self.capture_state)?;
+        #[cfg(target_os = "macos")]
+        {
+            let _ = &context;
+            Ok(macos::clear_private(receipt))
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = &context;
+            private_windows::clear(receipt)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (&context, receipt);
+            Ok(false)
+        } // Without atomic ownership, preserve the user's newer clipboard.
+    }
+
+    async fn clear_owned_ephemeral_text(&self) -> Result<bool> {
+        let receipt = lock_capture_state(&self.capture_state)?
+            .private_receipt
+            .clone();
+        if let Some(receipt) = receipt {
+            self.clear_ephemeral_text(&receipt).await
+        } else {
+            Ok(false)
+        }
     }
 
     async fn set_text(&self, content: &str) -> Result<()> {
