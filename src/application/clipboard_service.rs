@@ -231,6 +231,18 @@ impl ClipboardApplicationService {
         self.repository.delete(id).await
     }
 
+    pub async fn app_pins(
+        &self,
+        app_id: String,
+        query: ClipboardQuery,
+    ) -> Result<Vec<ClipboardSummary>> {
+        self.repository.app_pins(app_id, query).await
+    }
+
+    pub async fn set_app_pin(&self, id: u64, app_id: String, pinned: bool) -> Result<()> {
+        self.repository.set_app_pin(id, app_id, pinned).await
+    }
+
     pub async fn set_favorite(&self, id: u64, favorite: bool) -> Result<()> {
         self.repository.set_favorite(id, favorite).await
     }

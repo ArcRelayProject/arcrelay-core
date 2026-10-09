@@ -2085,3 +2085,223 @@ async fn recently_used_replica_survives_idle_retention_and_stale_usage_updates()
     assert_eq!(saved.record.image_png, Some(vec![1; 100]));
     assert!(target.replica_selection().await.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn app_pins_are_local_persistent_independent_and_filterable() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("clipboard.sqlite3");
+    let store = SqliteClipboardStore::connect(Some(&path)).await.unwrap();
+    let first = store
+        .store(
+            ClipboardPayload::Text("first pinned reply".into()),
+            "pin-first".into(),
+            summary(ClipboardContentKind::Text, "first pinned reply"),
+            true,
+            "local",
+            "Local",
+            true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let second = store
+        .store(
+            ClipboardPayload::Text("second reply".into()),
+            "pin-second".into(),
+            summary(ClipboardContentKind::Text, "second reply"),
+            true,
+            "local",
+            "Local",
+            true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let page = store.history(ClipboardQuery::recent(20)).await.unwrap();
+    let first_id = page
+        .entries
+        .iter()
+        .find(|entry| entry.sync_id == first.sync_id)
+        .unwrap()
+        .id;
+    let second_id = page
+        .entries
+        .iter()
+        .find(|entry| entry.sync_id == second.sync_id)
+        .unwrap()
+        .id;
+    let original = page
+        .entries
+        .iter()
+        .find(|entry| entry.id == first_id)
+        .unwrap()
+        .clone();
+    store
+        .set_app_pin(first_id, "macos:editor", true)
+        .await
+        .unwrap();
+    store
+        .set_app_pin(second_id, "macos:editor", true)
+        .await
+        .unwrap();
+    store
+        .set_app_pin(first_id, "macos:browser", true)
+        .await
+        .unwrap();
+    let revision = store.revision().await.unwrap();
+    store
+        .set_app_pin(first_id, "macos:editor", true)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.revision().await.unwrap(),
+        revision,
+        "idempotent pin preserves revision/order"
+    );
+    let entries = store
+        .app_pins("macos:editor", ClipboardQuery::recent(20))
+        .await
+        .unwrap();
+    assert_eq!(
+        entries.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+        [first_id, second_id]
+    );
+    assert_eq!(
+        entries[0], original,
+        "pinning leaves content, source, favorite, and activity unchanged"
+    );
+    let mut query = ClipboardQuery::recent(20);
+    query.search = Some("first pinned".into());
+    assert_eq!(
+        store.app_pins("macos:editor", query).await.unwrap().len(),
+        1
+    );
+    let label = store
+        .create_label("Replies", "#5B5FF0", "local")
+        .await
+        .unwrap();
+    store
+        .set_label_membership(second_id, &label.id, true, "local")
+        .await
+        .unwrap();
+    let mut query = ClipboardQuery::recent(20);
+    query.label_ids = vec![label.id];
+    assert_eq!(
+        store.app_pins("macos:editor", query).await.unwrap()[0].id,
+        second_id
+    );
+    store
+        .set_app_pin(first_id, "macos:editor", false)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .app_pins("macos:browser", ClipboardQuery::recent(20))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    store.db.close().await.unwrap();
+    let reopened = SqliteClipboardStore::connect(Some(&path)).await.unwrap();
+    assert_eq!(
+        reopened
+            .app_pins("macos:browser", ClipboardQuery::recent(20))
+            .await
+            .unwrap()[0]
+            .id,
+        first_id
+    );
+    assert_eq!(
+        reopened
+            .app_pins("macos:editor", ClipboardQuery::recent(20))
+            .await
+            .unwrap()[0]
+            .id,
+        second_id
+    );
+    reopened.delete(first_id, "local").await.unwrap();
+    assert!(reopened
+        .app_pins("macos:browser", ClipboardQuery::recent(20))
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(reopened
+        .set_app_pin(first_id, "macos:browser", true)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn app_pins_protect_idle_content_until_the_last_application_unpins() {
+    let store = SqliteClipboardStore::connect(None).await.unwrap();
+    store
+        .store(
+            ClipboardPayload::Text("keep this reply".into()),
+            "pin-retention".into(),
+            summary(ClipboardContentKind::Text, "keep this reply"),
+            true,
+            "local",
+            "Local",
+            true,
+        )
+        .await
+        .unwrap();
+    let id = store
+        .history(ClipboardQuery::recent(1))
+        .await
+        .unwrap()
+        .entries[0]
+        .id;
+    store.set_app_pin(id, "macos:editor", true).await.unwrap();
+    store.set_app_pin(id, "macos:browser", true).await.unwrap();
+    let old = Utc::now().timestamp_millis() - 60 * 86_400_000;
+    store
+        .db
+        .execute(Statement::from_sql_and_values(
+            sea_orm::DbBackend::Sqlite,
+            "UPDATE clipboard_entries SET captured_at_ms=?, last_used_at_ms=NULL WHERE id=?",
+            [old.into(), (id as i64).into()],
+        ))
+        .await
+        .unwrap();
+    store.maintain().await.unwrap();
+    assert_eq!(
+        store
+            .history(ClipboardQuery::recent(1))
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    store.set_app_pin(id, "macos:editor", false).await.unwrap();
+    store.maintain().await.unwrap();
+    assert_eq!(
+        store
+            .history(ClipboardQuery::recent(1))
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    store.set_app_pin(id, "macos:browser", false).await.unwrap();
+    store.maintain().await.unwrap();
+    assert!(store
+        .history(ClipboardQuery::recent(1))
+        .await
+        .unwrap()
+        .entries
+        .is_empty());
+    let remaining = store
+        .db
+        .query_one(Statement::from_string(
+            sea_orm::DbBackend::Sqlite,
+            "SELECT COUNT(*) AS count FROM clipboard_app_pins".to_string(),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(remaining.try_get::<i64>("", "count").unwrap(), 0);
+}

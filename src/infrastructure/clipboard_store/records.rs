@@ -320,52 +320,7 @@ impl SqliteClipboardStore {
                 .as_deref()
                 .is_none_or(|search| search.trim().is_empty());
         let limit = query.limit.clamp(1, 200);
-        let mut finder = summary_query().filter(clipboard_entry::Column::Deleted.eq(false));
-        if query.favorite_only {
-            finder = finder.filter(clipboard_entry::Column::Favorite.eq(true));
-        }
-        if !query.label_ids.is_empty() {
-            let matching_entries = clipboard_entry_label::Entity::find()
-                .select_only()
-                .column(clipboard_entry_label::Column::EntrySyncId)
-                .filter(clipboard_entry_label::Column::LabelId.is_in(query.label_ids))
-                .filter(clipboard_entry_label::Column::Attached.eq(true))
-                .into_query();
-            finder = finder.filter(clipboard_entry::Column::SyncId.in_subquery(matching_entries));
-        }
-        if !query.kinds.is_empty() {
-            let kinds = query.kinds.into_iter().map(kind_to_i32).collect::<Vec<_>>();
-            finder = finder.filter(clipboard_entry::Column::Kind.is_in(kinds));
-        }
-        if let Some(search) = query
-            .search
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            if search.chars().count() > 256 {
-                return Err(DbErr::Custom("clipboard search is too long".into()));
-            }
-            let search = search.to_lowercase();
-            let condition = if search.chars().count() >= 3 {
-                // Quoted FTS phrases retain literal substring semantics, including
-                // CJK and punctuation. Parameters never become FTS operators.
-                Expr::cust_with_values(
-                    "id IN (SELECT rowid FROM clipboard_search WHERE clipboard_search MATCH ?)",
-                    [format!("\"{}\"", search.replace('"', "\"\""))],
-                )
-            } else {
-                let pattern = format!(
-                    "%{}%",
-                    search
-                        .replace('\\', "\\\\")
-                        .replace('%', "\\%")
-                        .replace('_', "\\_")
-                );
-                Expr::cust_with_values("id IN (SELECT id FROM clipboard_search_documents WHERE text LIKE ? ESCAPE '\\')", [pattern])
-            };
-            finder = finder.filter(condition);
-        }
+        let mut finder = filtered_summary_query(&query)?;
         let total_count = if query.include_total_count {
             Some(if unfiltered {
                 Self::item_count(&db).await?
@@ -866,6 +821,7 @@ impl SqliteClipboardStore {
                 SELECT id FROM clipboard_entries
                 WHERE deleted=0 AND favorite=0
                   AND sync_id NOT IN (SELECT entry_sync_id FROM clipboard_entry_labels WHERE attached=1)
+                  AND id NOT IN (SELECT entry_id FROM clipboard_app_pins)
                   AND MAX(captured_at_ms, COALESCE(last_used_at_ms, captured_at_ms)) < ?
                 ORDER BY MAX(captured_at_ms, COALESCE(last_used_at_ms, captured_at_ms)), sync_id
                 LIMIT 128
@@ -878,4 +834,64 @@ impl SqliteClipboardStore {
         }
         Ok(())
     }
+}
+
+pub(super) fn filtered_summary_query(
+    query: &ClipboardQuery,
+) -> Result<sea_orm::Select<clipboard_entry::Entity>, DbErr> {
+    let mut finder = summary_query().filter(clipboard_entry::Column::Deleted.eq(false));
+    if query.favorite_only {
+        finder = finder.filter(clipboard_entry::Column::Favorite.eq(true));
+    }
+    if !query.label_ids.is_empty() {
+        let matching_entries = clipboard_entry_label::Entity::find()
+            .select_only()
+            .column(clipboard_entry_label::Column::EntrySyncId)
+            .filter(clipboard_entry_label::Column::LabelId.is_in(query.label_ids.clone()))
+            .filter(clipboard_entry_label::Column::Attached.eq(true))
+            .into_query();
+        finder = finder.filter(clipboard_entry::Column::SyncId.in_subquery(matching_entries));
+    }
+    if !query.kinds.is_empty() {
+        let kinds = query
+            .kinds
+            .iter()
+            .copied()
+            .map(kind_to_i32)
+            .collect::<Vec<_>>();
+        finder = finder.filter(clipboard_entry::Column::Kind.is_in(kinds));
+    }
+    if let Some(search) = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if search.chars().count() > 256 {
+            return Err(DbErr::Custom("clipboard search is too long".into()));
+        }
+        let search = search.to_lowercase();
+        let condition = if search.chars().count() >= 3 {
+            // Quoted FTS phrases retain literal substring semantics, including
+            // CJK and punctuation. Parameters never become FTS operators.
+            Expr::cust_with_values(
+                "id IN (SELECT rowid FROM clipboard_search WHERE clipboard_search MATCH ?)",
+                [format!("\"{}\"", search.replace('"', "\"\""))],
+            )
+        } else {
+            let pattern = format!(
+                "%{}%",
+                search
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            );
+            Expr::cust_with_values(
+                "id IN (SELECT id FROM clipboard_search_documents WHERE text LIKE ? ESCAPE '\\')",
+                [pattern],
+            )
+        };
+        finder = finder.filter(condition);
+    }
+    Ok(finder)
 }

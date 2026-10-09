@@ -534,6 +534,27 @@ pub trait ClipboardRepository: Send + Sync {
 
     async fn set_favorite(&self, id: u64, favorite: bool) -> crate::error::Result<()>;
 
+    /// Device-local application pins, independent of favorites and replication.
+    /// Query filters apply to the pinned summaries; capture/use timestamps are unchanged.
+    async fn app_pins(
+        &self,
+        _app_id: String,
+        _query: ClipboardQuery,
+    ) -> crate::error::Result<Vec<ClipboardSummary>> {
+        Ok(Vec::new())
+    }
+
+    async fn set_app_pin(
+        &self,
+        _id: u64,
+        _app_id: String,
+        _pinned: bool,
+    ) -> crate::error::Result<()> {
+        Err(crate::error::Error::NotSupported(
+            "application clipboard pins".into(),
+        ))
+    }
+
     async fn labels(&self) -> crate::error::Result<Vec<ClipboardLabel>>;
 
     async fn create_label(&self, name: &str, color: &str) -> crate::error::Result<ClipboardLabel>;

@@ -1,3 +1,4 @@
+mod app_pins;
 mod editor;
 mod entity;
 mod export;

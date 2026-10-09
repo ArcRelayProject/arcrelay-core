@@ -150,6 +150,8 @@ enum DbCommand {
     Revision(DbResponse<u64>),
     CurrentSummary(DbResponse<Option<ClipboardSummary>>),
     History(ClipboardQuery, DbResponse<ClipboardPage>),
+    AppPins(String, ClipboardQuery, DbResponse<Vec<ClipboardSummary>>),
+    SetAppPin(u64, String, bool, DbResponse<()>),
     Timeline(
         ClipboardTimelineQuery,
         DbResponse<Option<ClipboardTimelinePage>>,
@@ -233,6 +235,7 @@ impl DbCommand {
                 | Self::Revision(_)
                 | Self::CurrentSummary(_)
                 | Self::History(..)
+                | Self::AppPins(..)
                 | Self::Timeline(..)
                 | Self::ImagePng(..)
                 | Self::ImageOcr(..)

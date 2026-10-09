@@ -299,6 +299,25 @@ impl ClipboardRepository for NativeClipboard {
         Ok(())
     }
 
+    async fn app_pins(
+        &self,
+        app_id: String,
+        query: ClipboardQuery,
+    ) -> Result<Vec<ClipboardSummary>> {
+        let mut entries = self
+            .request(|response| DbCommand::AppPins(app_id, query, response))
+            .await?;
+        for summary in &mut entries {
+            hide_local_source_device(summary, &self.local_device_id);
+        }
+        Ok(entries)
+    }
+
+    async fn set_app_pin(&self, id: u64, app_id: String, pinned: bool) -> Result<()> {
+        self.request(|response| DbCommand::SetAppPin(id, app_id, pinned, response))
+            .await
+    }
+
     async fn labels(&self) -> Result<Vec<ClipboardLabel>> {
         self.request(DbCommand::Labels).await
     }

@@ -248,6 +248,19 @@ pub(super) async fn handle_database_command(
         DbCommand::History(query, response) => {
             let _ = response.send(store.history(query).await.map_err(db_error));
         }
+        DbCommand::AppPins(app_id, query, response) => {
+            let _ = response.send(store.app_pins(&app_id, query).await.map_err(db_error));
+        }
+        DbCommand::SetAppPin(id, app_id, pinned, response) => {
+            let result = store
+                .set_app_pin(id, &app_id, pinned)
+                .await
+                .map_err(db_error);
+            if result.is_ok() {
+                let _ = change_tx.send(());
+            }
+            let _ = response.send(result);
+        }
         DbCommand::Timeline(query, response) => {
             let _ = response.send(store.timeline(query).await.map_err(db_error));
         }
