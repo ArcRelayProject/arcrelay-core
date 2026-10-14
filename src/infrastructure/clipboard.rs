@@ -299,7 +299,6 @@ pub struct NativeClipboard {
     ocr_job_tx: mpsc::Sender<Option<OcrJob>>,
     local_device_id: String,
     local_device_name: String,
-    notifications_available: bool,
 }
 
 impl NativeClipboard {
@@ -373,7 +372,7 @@ impl NativeClipboard {
                 })?;
             }
         }
-        let notifications_available = start_watcher(
+        start_watcher(
             db.clone(),
             Arc::clone(&capture_state),
             source_provider.clone(),
@@ -394,7 +393,6 @@ impl NativeClipboard {
             sync_tx,
             ocr_events: ocr_event_tx,
             ocr_job_tx,
-            notifications_available,
             local_device_id,
             local_device_name,
         })

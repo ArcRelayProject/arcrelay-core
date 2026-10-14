@@ -21,8 +21,8 @@ impl ClipboardRepository for NativeClipboard {
     }
 
     fn subscribe_changes(&self) -> Option<tokio::sync::broadcast::Receiver<()>> {
-        self.notifications_available
-            .then(|| self.change_tx.subscribe())
+        // Database commits notify independently of native watcher availability.
+        Some(self.change_tx.subscribe())
     }
 
     fn subscribe_ocr_changes(&self) -> Option<tokio::sync::broadcast::Receiver<u64>> {

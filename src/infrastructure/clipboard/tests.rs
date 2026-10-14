@@ -251,7 +251,7 @@ fn rtf_only_capture_gets_a_safe_html_fallback() {
 #[tokio::test]
 async fn live_capture_events_follow_successful_commits_only() {
     let store = SqliteClipboardStore::connect(None).await.unwrap();
-    let (changes, _) = tokio::sync::broadcast::channel(8);
+    let (changes, mut history_events) = tokio::sync::broadcast::channel(8);
     let (captures, mut events) = tokio::sync::broadcast::channel(8);
     let (ocr, _) = mpsc::channel();
     for (text, live, capture_origin, expected) in [
@@ -291,6 +291,8 @@ async fn live_capture_events_follow_successful_commits_only() {
         )
         .await;
         assert!(response.await.unwrap().unwrap().is_some());
+        history_events.try_recv().unwrap();
+        assert!(history_events.try_recv().is_err());
         if let Some(expected) = expected {
             assert_eq!(events.try_recv().unwrap().origin, expected);
         }
@@ -320,6 +322,7 @@ async fn live_capture_events_follow_successful_commits_only() {
     )
     .await;
     assert!(response.await.unwrap().unwrap().is_none());
+    assert!(history_events.try_recv().is_err());
     assert!(events.try_recv().is_err());
 }
 
@@ -341,7 +344,7 @@ async fn remote_capture_events_exclude_history_and_duplicate_sync() {
         .await
         .unwrap()
         .unwrap();
-    let (changes, _) = tokio::sync::broadcast::channel(8);
+    let (changes, mut history_events) = tokio::sync::broadcast::channel(8);
     let (captures, mut events) = tokio::sync::broadcast::channel(8);
     let (ocr, _) = mpsc::channel();
     let mut history = record.clone();
@@ -357,6 +360,8 @@ async fn remote_capture_events_exclude_history_and_duplicate_sync() {
     )
     .await;
     assert!(response.await.unwrap().unwrap());
+    history_events.try_recv().unwrap();
+    assert!(history_events.try_recv().is_err());
     assert!(events.try_recv().is_err());
     let mut fresh = record;
     fresh.revision += 1;
@@ -370,6 +375,8 @@ async fn remote_capture_events_exclude_history_and_duplicate_sync() {
     )
     .await;
     assert!(response.await.unwrap().unwrap());
+    history_events.try_recv().unwrap();
+    assert!(history_events.try_recv().is_err());
     assert_eq!(
         events.try_recv().unwrap().origin,
         ClipboardCaptureOrigin::Remote
@@ -384,6 +391,7 @@ async fn remote_capture_events_exclude_history_and_duplicate_sync() {
     )
     .await;
     assert!(!response.await.unwrap().unwrap());
+    assert!(history_events.try_recv().is_err());
     assert!(events.try_recv().is_err());
 }
 
