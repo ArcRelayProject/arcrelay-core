@@ -171,6 +171,7 @@ struct InputState {
     scroll_momentum_active: bool,
     momentum_phase_began_pending: bool,
     system_gesture: SystemGestureSequence,
+    gesture_injector: macos_system_gesture::Injector,
     permission_granted: bool,
     permission_checked_at: Option<Instant>,
 }
@@ -188,6 +189,7 @@ impl Default for InputState {
             scroll_momentum_active: false,
             momentum_phase_began_pending: false,
             system_gesture: SystemGestureSequence::default(),
+            gesture_injector: macos_system_gesture::Injector::default(),
             permission_granted: false,
             permission_checked_at: None,
         }
@@ -508,7 +510,7 @@ impl NativeInputControl {
 
     fn release_state(state: &mut InputState) -> Result<()> {
         if let Some(cancel) = state.system_gesture.cancel() {
-            let _ = macos_system_gesture::post(cancel);
+            let _ = state.gesture_injector.post(cancel);
         }
         if state.scroll_gesture_active {
             let _ = Self::post_scroll(state, 0.0, 0.0, K_CG_SCROLL_PHASE_CANCELLED, 0);
@@ -649,9 +651,9 @@ impl NativeInputControl {
                         .apply(*gesture)
                         .map_err(|error| Error::InputControl(error.into()))?;
                     for phase in phases {
-                        if let Err(error) = macos_system_gesture::post(phase) {
+                        if let Err(error) = state.gesture_injector.post(phase) {
                             if let Some(cancel) = state.system_gesture.cancel() {
-                                let _ = macos_system_gesture::post(cancel);
+                                let _ = state.gesture_injector.post(cancel);
                             }
                             return Err(error);
                         }
