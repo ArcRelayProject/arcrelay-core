@@ -371,6 +371,47 @@ pub struct ClipboardImageOcr {
 
 #[async_trait::async_trait]
 pub trait ClipboardRepository: Send + Sync {
+    async fn collections(
+        &self,
+        _after: String,
+    ) -> crate::error::Result<Vec<super::collections::ClipboardCollection>> {
+        Ok(vec![])
+    }
+    async fn collection(
+        &self,
+        _id: String,
+    ) -> crate::error::Result<Option<super::collections::ClipboardCollection>> {
+        Ok(None)
+    }
+    async fn save_collection(
+        &self,
+        _draft: super::collections::CollectionDraft,
+    ) -> crate::error::Result<super::collections::ClipboardCollection> {
+        Err(crate::error::Error::Clipboard(
+            "collections unavailable".into(),
+        ))
+    }
+    async fn change_collection(
+        &self,
+        _id: String,
+        _base: Option<super::collections::CollectionVersion>,
+        _favorite: Option<bool>,
+    ) -> crate::error::Result<super::collections::ClipboardCollection> {
+        Err(crate::error::Error::Clipboard(
+            "collections unavailable".into(),
+        ))
+    }
+    async fn apply_collection(
+        &self,
+        _record: super::collections::ClipboardCollection,
+        _edits: bool,
+        _favorites: bool,
+    ) -> crate::error::Result<bool> {
+        Err(crate::error::Error::Clipboard(
+            "collections unavailable".into(),
+        ))
+    }
+
     /// Commits an isolated draft once, preserving its source record. Never writes the clipboard.
     async fn save_edited(
         &self,

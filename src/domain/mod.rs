@@ -3,10 +3,13 @@ pub mod clipboard;
 pub mod clipboard_text;
 pub mod device;
 pub mod input_control;
-pub mod login;
+
 pub mod media_control;
 mod paste_text_detector;
 pub mod process;
 pub mod system_monitor;
 pub mod text_slices;
 pub mod window_manager;
+
+pub mod collections;
+pub mod totp;

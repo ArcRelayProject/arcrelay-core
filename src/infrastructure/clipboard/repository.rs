@@ -2,6 +2,37 @@ use super::*;
 
 #[async_trait::async_trait]
 impl ClipboardRepository for NativeClipboard {
+    async fn collections(&self, after: String) -> Result<Vec<ClipboardCollection>> {
+        self.request(|r| DbCommand::Collections(after, r)).await
+    }
+    async fn collection(&self, id: String) -> Result<Option<ClipboardCollection>> {
+        self.request(|r| DbCommand::Collection(id, r)).await
+    }
+    async fn save_collection(&self, draft: CollectionDraft) -> Result<ClipboardCollection> {
+        self.request(|r| DbCommand::SaveCollection(draft, self.local_device_id.clone(), r))
+            .await
+    }
+    async fn change_collection(
+        &self,
+        id: String,
+        base: Option<CollectionVersion>,
+        favorite: Option<bool>,
+    ) -> Result<ClipboardCollection> {
+        self.request(|r| {
+            DbCommand::ChangeCollection(id, base, favorite, self.local_device_id.clone(), r)
+        })
+        .await
+    }
+    async fn apply_collection(
+        &self,
+        record: ClipboardCollection,
+        edits: bool,
+        favorites: bool,
+    ) -> Result<bool> {
+        self.request(|r| DbCommand::ApplyCollection(record, edits, favorites, r))
+            .await
+    }
+
     async fn shutdown(&self) {
         let receipt = self
             .capture_state

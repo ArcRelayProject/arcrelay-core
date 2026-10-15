@@ -57,6 +57,50 @@ fn db_error(error: sea_orm::DbErr) -> crate::Error {
 }
 #[async_trait::async_trait]
 impl ClipboardRepository for TestClipboardRepository {
+    async fn collections(
+        &self,
+        after: String,
+    ) -> Result<Vec<crate::domain::collections::ClipboardCollection>> {
+        self.store.collections(&after).await.map_err(db_error)
+    }
+    async fn collection(
+        &self,
+        id: String,
+    ) -> Result<Option<crate::domain::collections::ClipboardCollection>> {
+        self.store.collection(&id).await.map_err(db_error)
+    }
+    async fn save_collection(
+        &self,
+        draft: crate::domain::collections::CollectionDraft,
+    ) -> Result<crate::domain::collections::ClipboardCollection> {
+        self.store
+            .save_collection(draft, "fixture")
+            .await
+            .map_err(db_error)
+    }
+    async fn change_collection(
+        &self,
+        id: String,
+        base: Option<crate::domain::collections::CollectionVersion>,
+        favorite: Option<bool>,
+    ) -> Result<crate::domain::collections::ClipboardCollection> {
+        self.store
+            .change_collection(&id, base, favorite, "fixture")
+            .await
+            .map_err(db_error)
+    }
+    async fn apply_collection(
+        &self,
+        record: crate::domain::collections::ClipboardCollection,
+        edits: bool,
+        favorites: bool,
+    ) -> Result<bool> {
+        self.store
+            .apply_collection(record, edits, favorites)
+            .await
+            .map_err(db_error)
+    }
+
     fn subscribe_sync_changes(
         &self,
     ) -> Option<tokio::sync::broadcast::Receiver<ClipboardSyncRecord>> {

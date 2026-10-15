@@ -18,6 +18,7 @@ impl MigratorTrait for Migrator {
             Box::new(super::editor::EditorMigration),
             Box::new(super::retention::IdleRetention),
             Box::new(super::app_pins::ApplicationPinsMigration),
+            Box::new(super::collections::CollectionsMigration),
         ]
     }
 }

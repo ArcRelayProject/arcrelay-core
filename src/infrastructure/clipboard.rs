@@ -134,7 +134,20 @@ struct OcrJob {
 
 pub use text_preview::build_preview as preview_draft;
 
+use crate::domain::collections::{ClipboardCollection, CollectionDraft, CollectionVersion};
 enum DbCommand {
+    Collections(String, DbResponse<Vec<ClipboardCollection>>),
+    Collection(String, DbResponse<Option<ClipboardCollection>>),
+    SaveCollection(CollectionDraft, String, DbResponse<ClipboardCollection>),
+    ChangeCollection(
+        String,
+        Option<CollectionVersion>,
+        Option<bool>,
+        String,
+        DbResponse<ClipboardCollection>,
+    ),
+    ApplyCollection(ClipboardCollection, bool, bool, DbResponse<bool>),
+
     SaveEdited {
         session: String,
         source_id: u64,
@@ -231,7 +244,9 @@ impl DbCommand {
     fn read_only(&self) -> bool {
         matches!(
             self,
-            Self::EditOrigins(..)
+            Self::Collections(..)
+                | Self::Collection(..)
+                | Self::EditOrigins(..)
                 | Self::Revision(_)
                 | Self::CurrentSummary(_)
                 | Self::History(..)

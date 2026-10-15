@@ -239,6 +239,43 @@ pub(super) async fn handle_database_command(
     command: DbCommand,
 ) {
     match command {
+        DbCommand::Collections(after, response) => {
+            let _ = response.send(store.collections(&after).await.map_err(db_error));
+        }
+        DbCommand::Collection(id, response) => {
+            let _ = response.send(store.collection(&id).await.map_err(db_error));
+        }
+        DbCommand::SaveCollection(draft, device, response) => {
+            let result = store
+                .save_collection(draft, &device)
+                .await
+                .map_err(db_error);
+            if result.is_ok() {
+                let _ = change_tx.send(());
+            }
+            let _ = response.send(result);
+        }
+        DbCommand::ChangeCollection(id, base, favorite, device, response) => {
+            let result = store
+                .change_collection(&id, base, favorite, &device)
+                .await
+                .map_err(db_error);
+            if result.is_ok() {
+                let _ = change_tx.send(());
+            }
+            let _ = response.send(result);
+        }
+        DbCommand::ApplyCollection(record, edits, favorites, response) => {
+            let result = store
+                .apply_collection(record, edits, favorites)
+                .await
+                .map_err(db_error);
+            if matches!(result, Ok(true)) {
+                let _ = change_tx.send(());
+            }
+            let _ = response.send(result);
+        }
+
         DbCommand::Revision(response) => {
             let _ = response.send(store.revision().await.map_err(db_error));
         }

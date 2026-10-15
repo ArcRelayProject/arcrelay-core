@@ -21,7 +21,66 @@ pub struct ClipboardApplicationService {
     sync_preferences: Arc<RwLock<ClipboardSyncPreferences>>,
 }
 
+use crate::domain::collections::{
+    ClipboardCollection, CollectionDraft, CollectionVersion, TotpCode,
+};
 impl ClipboardApplicationService {
+    pub async fn collections(&self, after: String) -> Result<Vec<ClipboardCollection>> {
+        self.repository.collections(after).await
+    }
+    pub async fn collection(&self, id: String) -> Result<Option<ClipboardCollection>> {
+        self.repository.collection(id).await
+    }
+    pub async fn save_collection(&self, draft: CollectionDraft) -> Result<ClipboardCollection> {
+        self.repository.save_collection(draft).await
+    }
+    pub async fn change_collection(
+        &self,
+        id: String,
+        base: Option<CollectionVersion>,
+        favorite: Option<bool>,
+    ) -> Result<ClipboardCollection> {
+        self.repository.change_collection(id, base, favorite).await
+    }
+    pub async fn apply_collection(&self, record: ClipboardCollection) -> Result<bool> {
+        let p = self.sync_preferences();
+        if !p.enabled {
+            return Err(crate::error::Error::Clipboard(
+                "clipboard synchronization is disabled".into(),
+            ));
+        }
+        self.repository
+            .apply_collection(record, p.sync_edits_and_deletes, p.sync_favorites)
+            .await
+    }
+    pub async fn receive_collection(
+        &self,
+        record: ClipboardCollection,
+        edits: bool,
+        favorites: bool,
+    ) -> Result<bool> {
+        let p = self.sync_preferences();
+        if !p.enabled {
+            return Err(crate::error::Error::Clipboard(
+                "clipboard synchronization is disabled".into(),
+            ));
+        }
+        self.repository
+            .apply_collection(
+                record,
+                edits && p.sync_edits_and_deletes,
+                favorites && p.sync_favorites,
+            )
+            .await
+    }
+    pub async fn collection_value(&self, id: String, item: String) -> Result<TotpCode> {
+        self.collection(id)
+            .await?
+            .ok_or_else(|| crate::error::Error::Clipboard("Collection not found".into()))?
+            .item_value(&item, chrono::Utc::now().timestamp_millis())
+            .map_err(crate::error::Error::Clipboard)
+    }
+
     /// Clipboard insertion must not wait behind unrelated network commands
     /// just to query local Accessibility permission.
     pub fn input_permission_state(&self) -> InputPermissionState {
