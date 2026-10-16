@@ -25,6 +25,19 @@ use crate::domain::collections::{
     ClipboardCollection, CollectionDraft, CollectionVersion, TotpCode,
 };
 impl ClipboardApplicationService {
+    pub async fn collection_app_pins(&self, app_id: String) -> Result<Vec<String>> {
+        self.repository.collection_app_pins(app_id).await
+    }
+    pub async fn set_collection_app_pin(
+        &self,
+        id: String,
+        app_id: String,
+        pinned: bool,
+    ) -> Result<()> {
+        self.repository
+            .set_collection_app_pin(id, app_id, pinned)
+            .await
+    }
     pub async fn collections(&self, after: String) -> Result<Vec<ClipboardCollection>> {
         self.repository.collections(after).await
     }

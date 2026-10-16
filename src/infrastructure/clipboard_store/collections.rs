@@ -26,7 +26,10 @@ impl MigrationTrait for CollectionsMigration {
 fn invalid(message: impl Into<String>) -> DbErr {
     DbErr::Custom(message.into())
 }
-async fn get<C: ConnectionTrait>(db: &C, id: &str) -> Result<Option<ClipboardCollection>, DbErr> {
+pub(super) async fn get<C: ConnectionTrait>(
+    db: &C,
+    id: &str,
+) -> Result<Option<ClipboardCollection>, DbErr> {
     db.query_one(Statement::from_sql_and_values(
         sea_orm::DbBackend::Sqlite,
         "SELECT document FROM clipboard_collections WHERE id = ?",
@@ -45,6 +48,14 @@ async fn put<C: ConnectionTrait>(db: &C, value: &ClipboardCollection) -> Result<
     db.execute(Statement::from_sql_and_values(sea_orm::DbBackend::Sqlite,
         "INSERT INTO clipboard_collections (id, document) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET document = excluded.document",
         [value.id.clone().into(), document.into()])).await?;
+    if value.deleted {
+        db.execute(Statement::from_sql_and_values(
+            sea_orm::DbBackend::Sqlite,
+            "DELETE FROM clipboard_collection_app_pins WHERE collection_id=?",
+            [value.id.clone().into()],
+        ))
+        .await?;
+    }
     bump_revision(db).await
 }
 
@@ -198,6 +209,33 @@ mod tests {
                 totp: None,
             }],
         }
+    }
+    #[tokio::test]
+    async fn append_preserves_order_and_favorites_and_rejects_capacity_overflow_atomically() {
+        let store = SqliteClipboardStore::connect(None).await.unwrap();
+        let saved = store.save_collection(draft(), "a").await.unwrap();
+        store
+            .change_collection(&saved.id, None, Some(true), "a")
+            .await
+            .unwrap();
+        let mut appended = draft();
+        appended.id = Some(saved.id.clone());
+        appended.base = Some(saved.version());
+        appended.items = saved.items.clone();
+        let mut item = draft().items.remove(0);
+        item.label = "Extra".into();
+        item.value = "appended".into();
+        appended.items.push(item);
+        let updated = store.save_collection(appended, "a").await.unwrap();
+        assert!(updated.favorite);
+        assert_eq!(updated.items[0].value, "00123");
+        assert_eq!(updated.items[1].value, "appended");
+        let mut overflow = draft();
+        overflow.id = Some(updated.id.clone());
+        overflow.base = Some(updated.version());
+        overflow.items = (0..65).map(|_| draft().items.remove(0)).collect();
+        assert!(store.save_collection(overflow, "a").await.is_err());
+        assert!(store.collection(&updated.id).await.unwrap().unwrap() == updated);
     }
     #[tokio::test]
     async fn collection_is_durable_and_independent_of_history_and_selection() {

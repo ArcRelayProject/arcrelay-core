@@ -239,6 +239,19 @@ pub(super) async fn handle_database_command(
     command: DbCommand,
 ) {
     match command {
+        DbCommand::CollectionAppPins(app_id, response) => {
+            let _ = response.send(store.collection_app_pins(&app_id).await.map_err(db_error));
+        }
+        DbCommand::SetCollectionAppPin(id, app_id, pinned, response) => {
+            let result = store
+                .set_collection_app_pin(&id, &app_id, pinned)
+                .await
+                .map_err(db_error);
+            if result.is_ok() {
+                let _ = change_tx.send(());
+            }
+            let _ = response.send(result);
+        }
         DbCommand::Collections(after, response) => {
             let _ = response.send(store.collections(&after).await.map_err(db_error));
         }

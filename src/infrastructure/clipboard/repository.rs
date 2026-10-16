@@ -2,6 +2,14 @@ use super::*;
 
 #[async_trait::async_trait]
 impl ClipboardRepository for NativeClipboard {
+    async fn collection_app_pins(&self, app_id: String) -> Result<Vec<String>> {
+        self.request(|r| DbCommand::CollectionAppPins(app_id, r))
+            .await
+    }
+    async fn set_collection_app_pin(&self, id: String, app_id: String, pinned: bool) -> Result<()> {
+        self.request(|r| DbCommand::SetCollectionAppPin(id, app_id, pinned, r))
+            .await
+    }
     async fn collections(&self, after: String) -> Result<Vec<ClipboardCollection>> {
         self.request(|r| DbCommand::Collections(after, r)).await
     }

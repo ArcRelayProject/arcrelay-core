@@ -371,6 +371,19 @@ pub struct ClipboardImageOcr {
 
 #[async_trait::async_trait]
 pub trait ClipboardRepository: Send + Sync {
+    async fn collection_app_pins(&self, _app_id: String) -> crate::error::Result<Vec<String>> {
+        Ok(vec![])
+    }
+    async fn set_collection_app_pin(
+        &self,
+        _id: String,
+        _app_id: String,
+        _pinned: bool,
+    ) -> crate::error::Result<()> {
+        Err(crate::error::Error::Clipboard(
+            "collection pins unavailable".into(),
+        ))
+    }
     async fn collections(
         &self,
         _after: String,
