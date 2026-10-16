@@ -136,6 +136,8 @@ pub use text_preview::build_preview as preview_draft;
 
 use crate::domain::collections::{ClipboardCollection, CollectionDraft, CollectionVersion};
 enum DbCommand {
+    CollectionAppPins(String, DbResponse<Vec<String>>),
+    SetCollectionAppPin(String, String, bool, DbResponse<()>),
     Collections(String, DbResponse<Vec<ClipboardCollection>>),
     Collection(String, DbResponse<Option<ClipboardCollection>>),
     SaveCollection(CollectionDraft, String, DbResponse<ClipboardCollection>),
@@ -244,7 +246,8 @@ impl DbCommand {
     fn read_only(&self) -> bool {
         matches!(
             self,
-            Self::Collections(..)
+            Self::CollectionAppPins(..)
+                | Self::Collections(..)
                 | Self::Collection(..)
                 | Self::EditOrigins(..)
                 | Self::Revision(_)

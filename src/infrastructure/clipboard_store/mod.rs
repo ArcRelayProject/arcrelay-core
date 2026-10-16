@@ -1,4 +1,5 @@
 mod app_pins;
+mod collection_pins;
 mod collections;
 mod editor;
 mod entity;
