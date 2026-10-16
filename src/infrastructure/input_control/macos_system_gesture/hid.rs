@@ -10,9 +10,13 @@ use objc2::runtime::{AnyClass, AnyObject, Bool};
 use objc2::sel;
 
 const DOCK_SWIPE: u32 = 23;
+const FLUID_TOUCH: u32 = 27;
 const VELOCITY: u32 = 9;
+#[cfg(test)]
 const MOTION: u32 = (DOCK_SWIPE << 16) | 1;
+#[cfg(test)]
 const PROGRESS: u32 = (DOCK_SWIPE << 16) | 2;
+#[cfg(test)]
 const FLAVOR: u32 = (DOCK_SWIPE << 16) | 5;
 const VELOCITY_X: u32 = VELOCITY << 16;
 const VELOCITY_Y: u32 = (VELOCITY << 16) | 1;
@@ -30,6 +34,7 @@ struct Bridge {
 
 extern "C" {
     fn CGEventGetTimestamp(event: CGEventRef) -> u64;
+    fn CGEventGetDoubleValueField(event: CGEventRef, field: u32) -> f64;
 }
 
 fn bridge() -> Option<&'static Bridge> {
@@ -41,6 +46,11 @@ fn bridge() -> Option<&'static Bridge> {
 
 pub(super) fn available() -> bool {
     bridge().is_some()
+}
+
+pub(super) fn edge_available() -> bool {
+    static READY: OnceLock<bool> = OnceLock::new();
+    *READY.get_or_init(|| bridge().is_some_and(|bridge| bridge.probe_axis(4)))
 }
 
 impl Bridge {
@@ -112,7 +122,11 @@ impl Bridge {
         event
             .validate()
             .map_err(|error| Error::InputControl(error.into()))?;
-        let hid = self.new_event(DOCK_SWIPE, timestamp)?;
+        let edge = event.axis == 4;
+        let kind = if edge { FLUID_TOUCH } else { DOCK_SWIPE };
+        let motion = if edge { 9 } else { event.axis };
+        let flavor = if edge { 1 } else { 3 };
+        let hid = self.new_event(kind, timestamp)?;
         let direction = if event.inverted_from_device {
             -1.0
         } else {
@@ -122,10 +136,13 @@ impl Bridge {
         // progress AND terminal velocities must be normalized to avoid rebound.
         unsafe {
             let () = msg_send![&hid, setOptions: event.phase << PHASE_SHIFT];
-            let () = msg_send![&hid, setIntegerValue: event.axis as isize, forField: MOTION];
-            let () = msg_send![&hid, setIntegerValue: 3_isize, forField: FLAVOR];
-            let () =
-                msg_send![&hid, setDoubleValue: event.progress * direction, forField: PROGRESS];
+            let () = msg_send![&hid, setIntegerValue: motion as isize, forField: (kind << 16) | 1];
+            let () = msg_send![&hid, setIntegerValue: flavor as isize, forField: (kind << 16) | 5];
+            let () = msg_send![&hid, setDoubleValue: event.progress * direction, forField: (kind << 16) | 2];
+            if edge {
+                let () = msg_send![&hid, setDoubleValue: event.delta_x, forField: (kind << 16) | 3];
+                let () = msg_send![&hid, setDoubleValue: event.delta_y, forField: (kind << 16) | 4];
+            }
             if matches!(event.phase, 4 | 8) {
                 let velocity = self.new_event(VELOCITY, timestamp)?;
                 let () = msg_send![&velocity, setDoubleValue: event.velocity_x * direction, forField: VELOCITY_X];
@@ -145,43 +162,57 @@ impl Bridge {
     fn probe(&self) -> bool {
         // Do not advertise support based on symbol presence alone. Round-trip
         // all motions through the OS bridge without posting desktop input.
+        (1..=3).all(|axis| self.probe_axis(axis))
+    }
+
+    fn probe_axis(&self, axis: u32) -> bool {
         autoreleasepool(|_| {
-            (1..=3).all(|axis| {
-                let sample = SystemGestureEvent {
-                    axis,
-                    phase: 4,
-                    progress: -0.25,
-                    velocity_x: -3.5,
-                    velocity_y: 2.25,
-                    inverted_from_device: true,
-                    finger_count: 0,
-                };
-                let Ok((carrier, _)) = make_legacy_phase(sample) else {
-                    return false;
-                };
-                let timestamp = unsafe { CGEventGetTimestamp(carrier.0) };
-                let Ok(payload) = self.make_payload(sample, timestamp) else {
-                    return false;
-                };
-                unsafe {
-                    (self.set)(carrier.0, Retained::as_ptr(&payload));
-                }
-                // Verify the attached copy survives release of the input.
-                drop(payload);
-                let Some(copied) = self.copy_payload(carrier.0) else {
-                    return false;
-                };
-                unsafe {
-                    let kind: u32 = msg_send![&copied, type];
-                    let options: u32 = msg_send![&copied, options];
-                    let motion: isize = msg_send![&copied, integerValueForField: MOTION];
-                    let progress: f64 = msg_send![&copied, doubleValueForField: PROGRESS];
-                    kind == DOCK_SWIPE
-                        && options >> PHASE_SHIFT == 4
-                        && motion == axis as isize
-                        && (progress - 0.25).abs() < 0.0001
-                }
-            })
+            let sample = SystemGestureEvent {
+                axis,
+                phase: 4,
+                progress: -0.25,
+                velocity_x: -3.5,
+                velocity_y: 2.25,
+                inverted_from_device: axis != 4,
+                delta_x: if axis == 4 { -0.0625 } else { 0.0 },
+                delta_y: if axis == 4 { 0.03125 } else { 0.0 },
+                finger_count: if axis == 4 { 2 } else { 0 },
+            };
+            let carrier = if axis == 4 {
+                make_notification_phase(sample)
+            } else {
+                make_dock_phase(sample)
+            };
+            let Ok(carrier) = carrier else {
+                return false;
+            };
+            let timestamp = unsafe { CGEventGetTimestamp(carrier.0) };
+            let Ok(payload) = self.make_payload(sample, timestamp) else {
+                return false;
+            };
+            unsafe {
+                (self.set)(carrier.0, Retained::as_ptr(&payload));
+            }
+            // Verify the attached copy survives release of the input.
+            drop(payload);
+            let Some(copied) = self.copy_payload(carrier.0) else {
+                return false;
+            };
+            unsafe {
+                let kind: u32 = msg_send![&copied, type];
+                let options: u32 = msg_send![&copied, options];
+                let expected_kind = if axis == 4 { FLUID_TOUCH } else { DOCK_SWIPE };
+                let motion: isize =
+                    msg_send![&copied, integerValueForField: (expected_kind << 16) | 1];
+                let progress: f64 =
+                    msg_send![&copied, doubleValueForField: (expected_kind << 16) | 2];
+                let expected_progress = if axis == 4 { -0.25 } else { 0.25 };
+                kind == expected_kind
+                    && options >> PHASE_SHIFT == 4
+                    && motion == if axis == 4 { 9 } else { axis as isize }
+                    && (progress - expected_progress).abs() < 0.0001
+                    && (axis != 4 || decode_edge(carrier.0) == Some(sample))
+            }
         })
     }
 }
@@ -199,6 +230,69 @@ pub(super) fn attach(carrier: CGEventRef, event: SystemGestureEvent) -> Result<(
     })
 }
 
+pub(super) fn decode_edge(carrier: CGEventRef) -> Option<SystemGestureEvent> {
+    let bridge = bridge()?;
+    autoreleasepool(|_| unsafe {
+        let hid = bridge.copy_payload(carrier)?;
+        let kind: u32 = msg_send![&hid, type];
+        if kind != FLUID_TOUCH {
+            return None;
+        }
+        let motion: isize = msg_send![&hid, integerValueForField: (FLUID_TOUCH << 16) | 1];
+        let flavor: isize = msg_send![&hid, integerValueForField: (FLUID_TOUCH << 16) | 5];
+        let mask: isize = msg_send![&hid, integerValueForField: FLUID_TOUCH << 16];
+        if (motion, flavor, mask) != (9, 1, 0) {
+            return None;
+        }
+        let options: u32 = msg_send![&hid, options];
+        // Legacy 15 exposes release velocity as Quartz fields as well. Prefer
+        // a typed velocity child when present (the macOS 27 representation).
+        let terminal = matches!(options >> PHASE_SHIFT, 4 | 8);
+        let mut event = SystemGestureEvent {
+            axis: 4,
+            phase: options >> PHASE_SHIFT,
+            progress: msg_send![&hid, doubleValueForField: (FLUID_TOUCH << 16) | 2],
+            delta_x: msg_send![&hid, doubleValueForField: (FLUID_TOUCH << 16) | 3],
+            delta_y: msg_send![&hid, doubleValueForField: (FLUID_TOUCH << 16) | 4],
+            velocity_x: if terminal {
+                CGEventGetDoubleValueField(carrier, 129)
+            } else {
+                0.0
+            },
+            velocity_y: if terminal {
+                CGEventGetDoubleValueField(carrier, 130)
+            } else {
+                0.0
+            },
+            inverted_from_device: false,
+            finger_count: 2,
+        };
+        let children: *mut AnyObject = msg_send![&hid, children];
+        let count: usize = if children.is_null() {
+            0
+        } else {
+            msg_send![children, count]
+        };
+        if count > 32 {
+            return None;
+        }
+        let mut velocity_found = false;
+        for index in 0..count {
+            let child: *mut AnyObject = msg_send![children, objectAtIndex: index];
+            let child_kind: u32 = msg_send![child, type];
+            if child_kind == VELOCITY {
+                if velocity_found {
+                    return None;
+                }
+                velocity_found = true;
+                event.velocity_x = msg_send![child, doubleValueForField: VELOCITY_X];
+                event.velocity_y = msg_send![child, doubleValueForField: VELOCITY_Y];
+            }
+        }
+        event.validate().ok()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +301,53 @@ mod tests {
         fn CGEventCreateData(allocator: *const c_void, event: CGEventRef) -> *const c_void;
         fn CGEventCreateFromData(allocator: *const c_void, data: *const c_void) -> CGEventRef;
         fn CFGetRetainCount(object: *const c_void) -> isize;
+    }
+
+    #[test]
+    fn measured_notification_center_trace_round_trips_displacements_and_release_velocity() {
+        if matches!(os_major(), Some(15 | 27)) {
+            assert!(
+                edge_available(),
+                "verified macOS release requires FluidTouch round-trip"
+            );
+        } else if !edge_available() {
+            return;
+        }
+        let frames: Vec<SystemGestureEvent> = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/macos15-notification-center.json"
+        ))
+        .unwrap();
+        for mut frame in frames {
+            for phase in [frame.phase, 8] {
+                frame.phase = phase;
+                if phase == 8 {
+                    frame.velocity_x = 0.0;
+                    frame.velocity_y = 0.0;
+                }
+                let carrier = make_notification_phase(frame).unwrap();
+                attach(carrier.0, frame).unwrap();
+                assert_eq!(decode_edge(carrier.0), Some(frame));
+                let data = unsafe { CGEventCreateData(std::ptr::null(), carrier.0) };
+                assert!(!data.is_null());
+                let restored = OwnedEvent(unsafe { CGEventCreateFromData(std::ptr::null(), data) });
+                unsafe {
+                    CFRelease(data);
+                }
+                assert!(!restored.0.is_null());
+                assert_eq!(decode_edge(restored.0), Some(frame));
+                assert!(make_dock_phase(frame).is_err());
+                unsafe {
+                    let bridge = bridge().unwrap();
+                    let hid = bridge.copy_payload(carrier.0).unwrap();
+                    let () = msg_send![&hid, setIntegerValue: 5_isize, forField: (FLUID_TOUCH << 16) | 5];
+                    (bridge.set)(carrier.0, Retained::as_ptr(&hid));
+                    assert!(
+                        decode_edge(carrier.0).is_none(),
+                        "navigation flavor must pass through"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -234,6 +375,8 @@ mod tests {
                                 velocity_x: sign * 4.5,
                                 velocity_y: -sign * 2.25,
                                 inverted_from_device: inverted,
+                                delta_x: 0.0,
+                                delta_y: 0.0,
                                 finger_count: 0,
                             };
                             let (carrier, _) = make_legacy_phase(sample).unwrap();

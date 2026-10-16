@@ -219,7 +219,7 @@ mod native {
         }
         pub fn apply(&self, event: SystemGestureEvent) -> Result<()> {
             event
-                .validate_format(arcrelay_input::MAX_SYSTEM_GESTURE_FORMAT_VERSION)
+                .validate_format(arcrelay_input::SYSTEM_GESTURE_CONTACTS_FORMAT_VERSION)
                 .map_err(|error| Error::InputControl(error.into()))?;
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let phases = state
@@ -290,10 +290,22 @@ mod native {
                 velocity_x: 0.0,
                 velocity_y: 0.0,
                 inverted_from_device: false,
+                delta_x: 0.0,
+                delta_y: 0.0,
                 finger_count: 0,
             };
-            assert!(gesture.apply(event).is_err());
-            assert!(!gesture.state.lock().unwrap().attempted);
+            for invalid in [
+                event,
+                SystemGestureEvent {
+                    axis: 4,
+                    finger_count: 2,
+                    ..event
+                },
+            ] {
+                assert!(gesture.apply(invalid).is_err());
+                assert!(!gesture.state.lock().unwrap().attempted);
+                assert!(!gesture.state.lock().unwrap().sequence.is_active());
+            }
         }
     }
 }
@@ -309,6 +321,8 @@ mod tests {
             velocity_x: 0.0,
             velocity_y: 0.0,
             inverted_from_device: false,
+            delta_x: 0.0,
+            delta_y: 0.0,
             finger_count: 0,
         }
     }
