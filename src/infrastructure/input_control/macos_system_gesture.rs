@@ -23,6 +23,57 @@ pub fn supported() -> bool {
     backend().is_some()
 }
 
+/// FluidTouch requires the typed payload bridge on both legacy and modern Macs.
+pub fn notification_center_supported() -> bool {
+    matches!(os_major(), Some(12..=27)) && hid::edge_available()
+}
+
+/// Decode only the verified right-edge Notification Center HID route.
+///
+/// # Safety
+/// `event` must be a valid, live CGEvent reference for the duration of the call.
+pub unsafe fn decode_notification_event(event: *mut c_void) -> Option<SystemGestureEvent> {
+    hid::decode_edge(event)
+}
+
+fn make_notification_phase(event: SystemGestureEvent) -> Result<OwnedEvent> {
+    event
+        .validate()
+        .map_err(|error| Error::InputControl(error.into()))?;
+    if event.axis != 4 {
+        return Err(Error::InputControl(
+            "gesture is not a Notification Center edge".into(),
+        ));
+    }
+    let native = OwnedEvent::new()?;
+    unsafe {
+        for (field, value) in [
+            (55, 31),
+            (110, 27),
+            (123, 9),
+            (165, 9),
+            (132, i64::from(event.phase)),
+            (134, i64::from(event.phase)),
+            (133, 0),
+            (136, 0),
+            (FIELD_EVENT_SOURCE_USER_DATA, EVENT_TAG),
+        ] {
+            CGEventSetIntegerValueField(native.0, field, value);
+        }
+        for (field, value) in [
+            (124, event.progress),
+            (125, event.delta_x),
+            (126, event.delta_y),
+            (129, event.velocity_x),
+            (130, event.velocity_y),
+            (138, 1.0),
+        ] {
+            CGEventSetDoubleValueField(native.0, field, value);
+        }
+    }
+    Ok(native)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Backend {
     Legacy,
@@ -109,6 +160,9 @@ fn make_legacy_phase(event: SystemGestureEvent) -> Result<(OwnedEvent, OwnedEven
 }
 
 fn make_dock_phase(event: SystemGestureEvent) -> Result<OwnedEvent> {
+    if event.axis > 3 {
+        return Err(Error::InputControl("gesture is not a Dock gesture".into()));
+    }
     event
         .validate()
         .map_err(|error| Error::InputControl(error.into()))?;
@@ -147,9 +201,21 @@ pub struct Injector {
 
 impl Injector {
     pub fn post(&mut self, event: SystemGestureEvent) -> Result<()> {
+        event
+            .validate()
+            .map_err(|error| Error::InputControl(error.into()))?;
         let backend = backend().ok_or_else(|| {
             Error::InputControl("native system gesture backend is unavailable".into())
         })?;
+        if event.axis == 4 {
+            if !notification_center_supported() {
+                return Err(Error::InputControl(
+                    "native Notification Center gestures are unavailable".into(),
+                ));
+            }
+            self.pending_begin = None;
+            return post_native(event);
+        }
         // v3 identifies two-finger magnification separately from the system
         // pinch. It still uses a type-29 Zoom event on macOS 27, not DockSwipe.
         if event.axis == 3 && event.finger_count == 2 {
@@ -247,6 +313,14 @@ fn post_native(event: SystemGestureEvent) -> Result<()> {
     let backend = backend().ok_or_else(|| {
         Error::InputControl("native system gesture backend is unavailable".into())
     })?;
+    if event.axis == 4 {
+        let native = make_notification_phase(event)?;
+        hid::attach(native.0, event)?;
+        unsafe {
+            CGEventPost(1, native.0);
+        }
+        return Ok(());
+    }
     let (dock, companion) = match backend {
         Backend::Legacy => {
             let (dock, companion) = make_legacy_phase(event)?;
@@ -286,6 +360,8 @@ mod tests {
             velocity_x: -4.5,
             velocity_y: -4.5,
             inverted_from_device: false,
+            delta_x: 0.0,
+            delta_y: 0.0,
             finger_count: 0,
         };
         let (dock, companion) = make_legacy_phase(sample).unwrap();
@@ -315,6 +391,8 @@ mod tests {
                         velocity_x: sign * 4.5,
                         velocity_y: sign * 4.5,
                         inverted_from_device,
+                        delta_x: 0.0,
+                        delta_y: 0.0,
                         finger_count: 0,
                     };
                     let (dock, companion) = make_legacy_phase(sample).unwrap();
@@ -378,6 +456,8 @@ mod tests {
                     velocity_x: 0.0,
                     velocity_y: 0.0,
                     inverted_from_device: false,
+                    delta_x: 0.0,
+                    delta_y: 0.0,
                     finger_count: fingers,
                 };
                 injector.submit(begin, Backend::Hid, &mut send).unwrap();
@@ -424,6 +504,8 @@ mod tests {
             velocity_x: 0.0,
             velocity_y: 0.0,
             inverted_from_device: false,
+            delta_x: 0.0,
+            delta_y: 0.0,
             finger_count: 4,
         };
         let mut delivered = Vec::new();
@@ -468,6 +550,8 @@ mod tests {
             velocity_x: 0.0,
             velocity_y: 0.0,
             inverted_from_device: false,
+            delta_x: 0.0,
+            delta_y: 0.0,
             finger_count: 2,
         };
         let native = make_magnification_phase(zoom, zoom.progress - 0.15).unwrap();

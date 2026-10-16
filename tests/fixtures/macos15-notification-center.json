@@ -1,0 +1,112 @@
+[
+  {
+    "axis": 4,
+    "phase": 1,
+    "progress": 0.08203125,
+    "delta_x": -0.08203125,
+    "delta_y": 0.0280303955078125,
+    "velocity_x": 0,
+    "velocity_y": 0,
+    "finger_count": 2,
+    "inverted_from_device": false
+  },
+  {
+    "axis": 4,
+    "phase": 2,
+    "progress": 0.144805908203125,
+    "delta_x": -0.062774658203125,
+    "delta_y": 0.02197265625,
+    "velocity_x": 0,
+    "velocity_y": 0,
+    "finger_count": 2,
+    "inverted_from_device": false
+  },
+  {
+    "axis": 4,
+    "phase": 2,
+    "progress": 0.218109130859375,
+    "delta_x": -0.0732879638671875,
+    "delta_y": 0.0293121337890625,
+    "velocity_x": 0,
+    "velocity_y": 0,
+    "finger_count": 2,
+    "inverted_from_device": false
+  },
+  {
+    "axis": 4,
+    "phase": 2,
+    "progress": 0.269439697265625,
+    "delta_x": -0.05133056640625,
+    "delta_y": 0.0209503173828125,
+    "velocity_x": 0,
+    "velocity_y": 0,
+    "finger_count": 2,
+    "inverted_from_device": false
+  },
+  {
+    "axis": 4,
+    "phase": 2,
+    "progress": 0.331268310546875,
+    "delta_x": -0.06182861328125,
+    "delta_y": 0.0272369384765625,
+    "velocity_x": 0,
+    "velocity_y": 0,
+    "finger_count": 2,
+    "inverted_from_device": false
+  },
+  {
+    "axis": 4,
+    "phase": 2,
+    "progress": 0.386871337890625,
+    "delta_x": -0.0555877685546875,
+    "delta_y": 0.026214599609375,
+    "velocity_x": 0,
+    "velocity_y": 0,
+    "finger_count": 2,
+    "inverted_from_device": false
+  },
+  {
+    "axis": 4,
+    "phase": 2,
+    "progress": 0.423614501953125,
+    "delta_x": -0.0367279052734375,
+    "delta_y": 0.0178375244140625,
+    "velocity_x": 0,
+    "velocity_y": 0,
+    "finger_count": 2,
+    "inverted_from_device": false
+  },
+  {
+    "axis": 4,
+    "phase": 2,
+    "progress": 0.4698333740234375,
+    "delta_x": -0.04620361328125,
+    "delta_y": 0.0241546630859375,
+    "velocity_x": 0,
+    "velocity_y": 0,
+    "finger_count": 2,
+    "inverted_from_device": false
+  },
+  {
+    "axis": 4,
+    "phase": 2,
+    "progress": 0.5216827392578125,
+    "delta_x": -0.051849365234375,
+    "delta_y": 0.0275115966796875,
+    "velocity_x": 0,
+    "velocity_y": 0,
+    "finger_count": 2,
+    "inverted_from_device": false
+  },
+  {
+    "axis": 4,
+    "phase": 4,
+    "progress": 0.5216827392578125,
+    "delta_x": -0.051849365234375,
+    "delta_y": 0.0275115966796875,
+    "velocity_x": 7.5135498046875,
+    "velocity_y": 7.5135498046875,
+    "finger_count": 2,
+    "inverted_from_device": false
+  }
+]

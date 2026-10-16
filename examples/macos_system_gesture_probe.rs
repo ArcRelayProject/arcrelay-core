@@ -8,13 +8,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use arcrelay_input::SystemGestureEvent;
     use std::{thread, time::Duration};
 
-    println!("gesture_backend={}", gesture::backend_name());
+    println!(
+        "gesture_backend={} notification_center={}",
+        gesture::backend_name(),
+        gesture::notification_center_supported()
+    );
     if !gesture::supported() {
         return Err("native system gesture backend is unavailable".into());
     }
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
         println!("Native bridge probe passed; no desktop input posted.");
+        return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("--post-notification-center") {
+        if args.len() > 2 || (args.len() == 2 && args[1] != "cancel") {
+            return Err("usage: --post-notification-center [cancel]".into());
+        }
+        #[link(name = "ApplicationServices", kind = "framework")]
+        extern "C" {
+            fn AXIsProcessTrusted() -> u8;
+        }
+        if unsafe { AXIsProcessTrusted() } == 0 {
+            return Err("Accessibility permission is required; no input was posted".into());
+        }
+        let mut frames: Vec<SystemGestureEvent> = serde_json::from_str(include_str!(
+            "../tests/fixtures/macos15-notification-center.json"
+        ))?;
+        if args.len() == 2 {
+            let end = frames.last_mut().unwrap();
+            *end = end.cancelled();
+        }
+        let mut injector = gesture::Injector::default();
+        let mut last = None;
+        for event in frames {
+            if let Err(error) = injector.post(event) {
+                if let Some(previous) = last {
+                    let _ = injector.post(SystemGestureEvent::cancelled(previous));
+                }
+                return Err(error.into());
+            }
+            last = Some(event);
+            thread::sleep(Duration::from_millis(10));
+        }
+        println!("Posted measured Notification Center edge gesture.");
         return Ok(());
     }
     if !(args.len() == 3 || args.len() == 4)
@@ -39,6 +76,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         velocity_x: 0.0,
         velocity_y: 0.0,
         inverted_from_device: false,
+        delta_x: 0.0,
+        delta_y: 0.0,
         finger_count: if axis == 3 { 0 } else { 3 },
     }
     .validate()?;
