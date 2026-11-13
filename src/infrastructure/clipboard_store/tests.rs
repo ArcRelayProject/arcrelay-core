@@ -2305,3 +2305,224 @@ async fn app_pins_protect_idle_content_until_the_last_application_unpins() {
         .unwrap();
     assert_eq!(remaining.try_get::<i64>("", "count").unwrap(), 0);
 }
+
+#[tokio::test]
+async fn sensitive_rules_preserve_long_documents_and_filter_actual_credentials() {
+    let store = SqliteClipboardStore::connect(None).await.unwrap();
+    let document = format!(
+        "{}\nThe password setting is described here.\npassword=actual-credential-123",
+        "Technical documentation. ".repeat(10_000)
+    );
+    for (id, payload) in [
+        ("long-plain", ClipboardPayload::Text(document.clone())),
+        (
+            "long-rich",
+            ClipboardPayload::RichText {
+                html: format!("<pre>{document}</pre>"),
+                plain_text: document.clone(),
+                rtf: None,
+            },
+        ),
+    ] {
+        let kind = if id == "long-plain" {
+            ClipboardContentKind::Text
+        } else {
+            ClipboardContentKind::Html
+        };
+        assert!(store
+            .store(
+                payload,
+                id.into(),
+                summary(kind, "Technical documentation"),
+                true,
+                "local",
+                "Local",
+                true
+            )
+            .await
+            .unwrap()
+            .is_some());
+    }
+    assert!(store
+        .store(
+            ClipboardPayload::Text("password=actual-credential-123".into()),
+            "credential".into(),
+            summary(ClipboardContentKind::Text, "credential"),
+            true,
+            "local",
+            "Local",
+            true
+        )
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        store
+            .history(ClipboardQuery::recent(20))
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn custom_sensitive_settings_persist_and_apply_to_new_captures_and_edits() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("clipboard.sqlite3");
+    let store = SqliteClipboardStore::connect(Some(&path)).await.unwrap();
+    store
+        .store(
+            ClipboardPayload::Text("ordinary source".into()),
+            "source".into(),
+            summary(ClipboardContentKind::Text, "ordinary source"),
+            true,
+            "local",
+            "Local",
+            true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let id = store
+        .history(ClipboardQuery::recent(20))
+        .await
+        .unwrap()
+        .entries[0]
+        .id;
+    let settings = ClipboardSensitiveSettings {
+        credential_assignments: false,
+        custom_keywords: vec!["Internal-Only".into()],
+        ..Default::default()
+    };
+    store
+        .update_sensitive_settings(settings.clone())
+        .await
+        .unwrap();
+    drop(store);
+    let store = SqliteClipboardStore::connect(Some(&path)).await.unwrap();
+    assert_eq!(store.sensitive_settings().await.unwrap(), settings);
+    assert_eq!(store.policy().await.unwrap().retention_days, 30);
+    assert!(store
+        .store(
+            ClipboardPayload::Text("a long INTERNAL-ONLY document".into()),
+            "filtered-custom".into(),
+            summary(ClipboardContentKind::Text, "document"),
+            true,
+            "local",
+            "Local",
+            true
+        )
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .store(
+            ClipboardPayload::Text("password=actual-credential-123".into()),
+            "allowed-credential".into(),
+            summary(ClipboardContentKind::Text, "credential"),
+            true,
+            "local",
+            "Local",
+            true
+        )
+        .await
+        .unwrap()
+        .is_some());
+    assert!(store
+        .save_edited(
+            "filtered-edit",
+            id,
+            ClipboardPayload::Text("INTERNAL-ONLY edit".into()),
+            "edit-hash".into(),
+            summary(ClipboardContentKind::Text, "edit"),
+            "local",
+            "Local"
+        )
+        .await
+        .is_err());
+    let mut disabled = settings.clone();
+    disabled.enabled = false;
+    store.update_sensitive_settings(disabled).await.unwrap();
+    assert!(store
+        .save_edited(
+            "allowed-edit",
+            id,
+            ClipboardPayload::Text("INTERNAL-ONLY edit".into()),
+            "allowed-edit-hash".into(),
+            summary(ClipboardContentKind::Text, "edit"),
+            "local",
+            "Local"
+        )
+        .await
+        .is_ok());
+
+    // Saving matched content keeps its payload but masks previews and excludes search text.
+    store
+        .update_sensitive_settings(ClipboardSensitiveSettings {
+            save_sensitive: true,
+            ..settings
+        })
+        .await
+        .unwrap();
+    store
+        .store(
+            ClipboardPayload::Text("INTERNAL-ONLY saved content".into()),
+            "saved-sensitive".into(),
+            summary(ClipboardContentKind::Text, "must not leak"),
+            true,
+            "local",
+            "Local",
+            true,
+        )
+        .await
+        .unwrap();
+    let history = store.history(ClipboardQuery::recent(20)).await.unwrap();
+    let saved = history.entries.iter().find(|e| e.sensitive).unwrap();
+    assert_eq!(saved.preview, "••••••••");
+    assert_eq!(
+        store.text_content(saved.id).await.unwrap(),
+        "INTERNAL-ONLY saved content"
+    );
+    let model = clipboard_entry::Entity::find_by_id(saved.id as i64)
+        .one(&store.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(model.search_text.is_empty());
+    let mut invalid = store.sensitive_settings().await.unwrap();
+    invalid.custom_keywords = vec!["".into()];
+    assert!(store.update_sensitive_settings(invalid).await.is_err());
+    assert!(store.sensitive_settings().await.unwrap().save_sensitive);
+}
+
+#[test]
+fn sensitive_rules_migration_preserves_existing_policy_and_protocol_updates() {
+    assert!(tokio::runtime::Handle::try_current().is_err());
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("clipboard.sqlite3");
+        let store = SqliteClipboardStore::connect(Some(&path)).await.unwrap();
+        Migrator::down(&store.db, Some(1)).await.unwrap();
+        store
+            .db
+            .execute_unprepared("UPDATE clipboard_state SET save_sensitive=1, retention_days=90")
+            .await
+            .unwrap();
+        drop(store);
+        let store = SqliteClipboardStore::connect(Some(&path)).await.unwrap();
+        let mut settings = store.sensitive_settings().await.unwrap();
+        assert!(settings.enabled && settings.save_sensitive);
+        assert_eq!(store.policy().await.unwrap().retention_days, 90);
+        settings.private_keys = false;
+        store.update_sensitive_settings(settings).await.unwrap();
+        let mut policy = store.policy().await.unwrap();
+        policy.retention_days = 7;
+        policy.save_sensitive = false;
+        store.update_policy(policy).await.unwrap();
+        let settings = store.sensitive_settings().await.unwrap();
+        assert!(!settings.private_keys && !settings.save_sensitive);
+    });
+}

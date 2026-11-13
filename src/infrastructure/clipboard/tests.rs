@@ -54,7 +54,7 @@ fn content_hash_is_stable_and_type_scoped() {
 }
 
 #[test]
-fn summaries_are_bounded_and_sensitive_values_are_masked() {
+fn summaries_are_bounded_before_database_policy_is_applied() {
     let normal = summarize(&ClipboardPayload::Text("hello   world".into()), None);
     assert_eq!(normal.preview, "hello world");
     assert!(!normal.sensitive);
@@ -63,8 +63,8 @@ fn summaries_are_bounded_and_sensitive_values_are_masked() {
         &ClipboardPayload::Text("api_key=sk-host-only-secret".into()),
         Some("Terminal".into()),
     );
-    assert_eq!(sensitive.preview, "••••••••");
-    assert!(sensitive.sensitive);
+    assert_eq!(sensitive.preview, "api_key=sk-host-only-secret");
+    assert!(!sensitive.sensitive);
     assert_eq!(sensitive.source_app.as_deref(), Some("Terminal"));
 }
 

@@ -23,9 +23,9 @@ use crate::domain::clipboard::{
 use crate::domain::clipboard::{
     ClipboardCaptureEvent, ClipboardCaptureOrigin, ClipboardContentKind, ClipboardExportRecord,
     ClipboardImageOcr, ClipboardLabel, ClipboardPage, ClipboardPasteMode, ClipboardPayload,
-    ClipboardPolicy, ClipboardQuery, ClipboardRepository, ClipboardSummary,
-    ClipboardSyncChangeKind, ClipboardSyncPage, ClipboardSyncRecord, ClipboardTextSyntax,
-    ClipboardTimelinePage, ClipboardTimelineQuery,
+    ClipboardPolicy, ClipboardQuery, ClipboardRepository, ClipboardSensitiveSettings,
+    ClipboardSummary, ClipboardSyncChangeKind, ClipboardSyncPage, ClipboardSyncRecord,
+    ClipboardTextSyntax, ClipboardTimelinePage, ClipboardTimelineQuery,
 };
 use crate::domain::clipboard_text::{convert_payload, detect_text_syntax};
 use crate::domain::window_manager::WindowManagerRepository;
@@ -183,6 +183,8 @@ enum DbCommand {
     ValidateExport(Vec<(u64, String)>, DbResponse<bool>),
     HtmlPayload(u64, DbResponse<Option<String>>),
     Policy(DbResponse<ClipboardPolicy>),
+    SensitiveSettings(DbResponse<ClipboardSensitiveSettings>),
+    UpdateSensitiveSettings(ClipboardSensitiveSettings, DbResponse<()>),
     Store {
         payload: ClipboardPayload,
         content_hash: String,
@@ -263,6 +265,7 @@ impl DbCommand {
                 | Self::TextContent(..)
                 | Self::HtmlPayload(..)
                 | Self::Policy(_)
+                | Self::SensitiveSettings(_)
                 | Self::Labels(_)
                 | Self::ReplicaPage(..)
                 | Self::ReplicaRecord(..)

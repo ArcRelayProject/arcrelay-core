@@ -140,6 +140,15 @@ impl ClipboardRepository for TestClipboardRepository {
             "native operation is unavailable in a database test".into(),
         ))
     }
+    async fn sensitive_settings(&self) -> Result<ClipboardSensitiveSettings> {
+        self.store.sensitive_settings().await.map_err(db_error)
+    }
+    async fn update_sensitive_settings(&self, settings: ClipboardSensitiveSettings) -> Result<()> {
+        self.store
+            .update_sensitive_settings(settings)
+            .await
+            .map_err(db_error)
+    }
     async fn policy(&self) -> crate::error::Result<ClipboardPolicy> {
         self.store.policy().await.map_err(db_error)
     }

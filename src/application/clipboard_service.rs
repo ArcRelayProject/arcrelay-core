@@ -6,8 +6,9 @@ use crate::domain::clipboard::{
 
 use crate::domain::clipboard::{
     ClipboardContentKind, ClipboardImageOcr, ClipboardLabel, ClipboardPage, ClipboardPasteMode,
-    ClipboardPolicy, ClipboardQuery, ClipboardRepository, ClipboardSummary, ClipboardSyncPage,
-    ClipboardSyncPreferences, ClipboardSyncRecord, ClipboardTimelinePage, ClipboardTimelineQuery,
+    ClipboardPolicy, ClipboardQuery, ClipboardRepository, ClipboardSensitiveSettings,
+    ClipboardSummary, ClipboardSyncPage, ClipboardSyncPreferences, ClipboardSyncRecord,
+    ClipboardTimelinePage, ClipboardTimelineQuery,
 };
 use crate::domain::input_control::{InputControlRepository, InputPermissionState};
 use crate::error::Result;
@@ -260,6 +261,17 @@ impl ClipboardApplicationService {
 
     pub async fn safe_html_preview(&self, id: u64) -> Result<Option<String>> {
         self.repository.safe_html_preview(id).await
+    }
+
+    pub async fn sensitive_settings(&self) -> Result<ClipboardSensitiveSettings> {
+        self.repository.sensitive_settings().await
+    }
+
+    pub async fn update_sensitive_settings(
+        &self,
+        settings: ClipboardSensitiveSettings,
+    ) -> Result<()> {
+        self.repository.update_sensitive_settings(settings).await
     }
 
     pub async fn policy(&self) -> Result<ClipboardPolicy> {

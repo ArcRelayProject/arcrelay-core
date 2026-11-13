@@ -1,3 +1,4 @@
+pub use super::clipboard_sensitive::ClipboardSensitiveSettings;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -555,6 +556,21 @@ pub trait ClipboardRepository: Send + Sync {
     async fn policy(&self) -> crate::error::Result<ClipboardPolicy>;
 
     async fn update_policy(&self, policy: ClipboardPolicy) -> crate::error::Result<()>;
+
+    async fn sensitive_settings(&self) -> crate::error::Result<ClipboardSensitiveSettings> {
+        Err(crate::error::Error::NotSupported(
+            "clipboard sensitive settings".into(),
+        ))
+    }
+
+    async fn update_sensitive_settings(
+        &self,
+        _settings: ClipboardSensitiveSettings,
+    ) -> crate::error::Result<()> {
+        Err(crate::error::Error::NotSupported(
+            "clipboard sensitive settings".into(),
+        ))
+    }
 
     /// Write arbitrary text to the host clipboard and retain it in host
     /// history. Kept for the existing write-clipboard capability.

@@ -352,6 +352,19 @@ pub(super) async fn handle_database_command(
         DbCommand::HtmlPayload(id, response) => {
             let _ = response.send(store.html_payload(id).await.map_err(db_error));
         }
+        DbCommand::SensitiveSettings(response) => {
+            let _ = response.send(store.sensitive_settings().await.map_err(db_error));
+        }
+        DbCommand::UpdateSensitiveSettings(settings, response) => {
+            let result = store
+                .update_sensitive_settings(settings)
+                .await
+                .map_err(db_error);
+            if result.is_ok() {
+                let _ = change_tx.send(());
+            }
+            let _ = response.send(result);
+        }
         DbCommand::Policy(response) => {
             let _ = response.send(store.policy().await.map_err(db_error));
         }
