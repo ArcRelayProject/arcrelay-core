@@ -32,7 +32,7 @@ impl SqliteClipboardStore {
         source_id: u64,
         payload: ClipboardPayload,
         hash: String,
-        summary: ClipboardSummary,
+        mut summary: ClipboardSummary,
         device: &str,
         name: &str,
     ) -> Result<(u64, ClipboardSyncRecord), DbErr> {
@@ -64,14 +64,17 @@ impl SqliteClipboardStore {
             .await?
             .ok_or_else(|| DbErr::Custom("clipboard state is unavailable".into()))?;
         let policy = policy_from_state(&state);
-        if !policy.history_enabled
-            || ((source.sensitive || summary.sensitive) && !policy.save_sensitive)
-        {
+        let stored = StoredValues::from_payload(payload)?;
+        sensitive::classify(
+            &mut summary,
+            &stored,
+            &sensitive::settings_from_state(&state)?,
+        );
+        if !policy.history_enabled || (summary.sensitive && !policy.save_sensitive) {
             return Err(DbErr::Custom(
                 "clipboard policy prevents saving this edit".into(),
             ));
         }
-        let stored = StoredValues::from_payload(payload)?;
         let search_text = build_search_text(&summary, &stored);
         let storage_bytes = stored
             .storage_bytes()
@@ -105,7 +108,7 @@ impl SqliteClipboardStore {
             item_count: Set(summary.item_count as i32),
             width: Set(summary.width.map(|v| v as i32)),
             height: Set(summary.height.map(|v| v as i32)),
-            sensitive: Set(source.sensitive || summary.sensitive),
+            sensitive: Set(summary.sensitive),
             favorite: Set(false),
             favorite_revision: Set(1),
             favorite_updated_by_device_id: Set(device.into()),

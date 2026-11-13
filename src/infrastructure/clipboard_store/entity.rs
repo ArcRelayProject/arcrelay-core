@@ -142,6 +142,8 @@ pub mod clipboard_state {
         pub max_bytes: i64,
         pub retention_days: i32,
         pub save_sensitive: bool,
+        #[sea_orm(column_type = "Text")]
+        pub sensitive_rules_json: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -190,6 +190,15 @@ impl ClipboardRepository for NativeClipboard {
         Ok(())
     }
 
+    async fn sensitive_settings(&self) -> Result<ClipboardSensitiveSettings> {
+        self.request(DbCommand::SensitiveSettings).await
+    }
+
+    async fn update_sensitive_settings(&self, settings: ClipboardSensitiveSettings) -> Result<()> {
+        self.request(|r| DbCommand::UpdateSensitiveSettings(settings, r))
+            .await
+    }
+
     async fn policy(&self) -> Result<ClipboardPolicy> {
         self.request(DbCommand::Policy).await
     }

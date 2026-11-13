@@ -65,6 +65,7 @@ impl SqliteClipboardStore {
                 max_bytes: Set(0),
                 retention_days: Set(policy.retention_days as i32),
                 save_sensitive: Set(policy.save_sensitive),
+                sensitive_rules_json: Set("{}".into()),
             }
             .insert(&self.db)
             .await?;
@@ -127,7 +128,18 @@ impl SqliteClipboardStore {
             .await?
             .ok_or_else(|| DbErr::Custom("clipboard state is unavailable".into()))?;
         let policy = policy_from_state(&state);
+        let settings = sensitive::settings_from_state(&state)?;
+        sensitive::classify(&mut summary, &stored, &settings);
         if !policy.history_enabled || (summary.sensitive && !policy.save_sensitive) {
+            tracing::debug!(
+                event = "clipboard.capture.skipped",
+                reason = if !policy.history_enabled {
+                    "history_disabled"
+                } else {
+                    "sensitive_rule"
+                },
+                "clipboard policy skipped capture"
+            );
             transaction.rollback().await?;
             return Ok(None);
         }
@@ -798,7 +810,7 @@ impl SqliteClipboardStore {
         Ok(())
     }
 
-    async fn state(&self) -> Result<clipboard_state::Model, DbErr> {
+    pub(super) async fn state(&self) -> Result<clipboard_state::Model, DbErr> {
         clipboard_state::Entity::find_by_id(STATE_ID)
             .one(&self.db)
             .await?

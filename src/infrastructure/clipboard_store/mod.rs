@@ -10,6 +10,7 @@ mod records;
 mod replica;
 mod retention;
 mod search_index;
+mod sensitive;
 mod sync;
 mod timeline;
 
@@ -37,9 +38,9 @@ use crate::domain::clipboard::{
 use crate::domain::clipboard::{
     ClipboardContentKind, ClipboardCursor, ClipboardImageOcr, ClipboardLabel,
     ClipboardLabelMembership, ClipboardOcrBlock, ClipboardPage, ClipboardPayload, ClipboardPolicy,
-    ClipboardQuery, ClipboardSortBy, ClipboardSummary, ClipboardSyncChangeKind, ClipboardSyncPage,
-    ClipboardSyncRecord, ClipboardTextSyntax, ClipboardTimelinePage, ClipboardTimelinePosition,
-    ClipboardTimelineQuery,
+    ClipboardQuery, ClipboardSensitiveSettings, ClipboardSortBy, ClipboardSummary,
+    ClipboardSyncChangeKind, ClipboardSyncPage, ClipboardSyncRecord, ClipboardTextSyntax,
+    ClipboardTimelinePage, ClipboardTimelinePosition, ClipboardTimelineQuery,
 };
 use crate::domain::clipboard_text::detect_text_syntax;
 

@@ -739,18 +739,10 @@ pub(super) fn summarize(
             )
         }
     };
-    let sensitive = matches!(
-        kind,
-        ClipboardContentKind::Text | ClipboardContentKind::Html
-    ) && looks_sensitive(preview_source.as_ref());
     ClipboardSummary {
         id: 0,
         kind,
-        preview: if sensitive {
-            "••••••••".into()
-        } else {
-            bounded_preview(preview_source.as_ref())
-        },
+        preview: bounded_preview(preview_source.as_ref()),
         source_app,
         first_captured_at: captured_at,
         captured_at,
@@ -760,7 +752,8 @@ pub(super) fn summarize(
         item_count,
         width,
         height,
-        sensitive,
+        // The database applies current device-local rules before committing.
+        sensitive: false,
         favorite: false,
         labels: Vec::new(),
         copy_count: 1,
@@ -892,29 +885,6 @@ pub(super) fn strip_html(html: &str) -> String {
         .replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
-}
-
-pub(super) fn looks_sensitive(value: &str) -> bool {
-    [
-        "password",
-        "passwd",
-        "passcode",
-        "api_key",
-        "api-key",
-        "access_token",
-        "refresh_token",
-        "secret=",
-        "secret:",
-        "authorization: bearer",
-        "private key",
-    ]
-    .iter()
-    .any(|needle| {
-        value
-            .as_bytes()
-            .windows(needle.len())
-            .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
-    })
 }
 
 pub(super) fn detect_text_syntax_bounded(value: &str) -> ClipboardTextSyntax {
