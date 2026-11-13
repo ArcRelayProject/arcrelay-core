@@ -395,11 +395,7 @@ impl TextDetector {
         // The domain allows letters, digits, dots, and hyphens.
         let is_valid_domain_char = |c: char| c.is_alphanumeric() || c == '.' || c == '-';
 
-        if !domain.chars().all(is_valid_domain_char) {
-            return false;
-        }
-
-        true
+        domain.chars().all(is_valid_domain_char)
     }
 
     /// Returns whether the text is a phone number.
@@ -573,11 +569,7 @@ impl TextDetector {
         }
 
         // Home-directory path: `~/...`.
-        if trimmed.starts_with("~/") {
-            return true;
-        }
-
-        false
+        trimmed.starts_with("~/")
     }
 
     /// Returns whether the text is a Mermaid diagram.
